@@ -1,0 +1,23 @@
+# Ignore virtual environment folders
+./venv/
+env/
+virtualenv/
+.venv/
+
+# Ignore Python compiled files
+*.pyc
+__pycache__/
+*.pyo
+*.pyd
+
+# Ignore other common files and directories
+*.log
+*. DS_Store
+*.idea/
+*.vscode/
+dist/
+build/
+*.egg-info/
+
+# Allow Python source files
+!*.py
