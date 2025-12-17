@@ -6,17 +6,27 @@ import numpy as np
 from tqdm import tqdm
 
 class Trainer:
-    def __init__(self, model, device='cpu', pos_weight=None):
+    def __init__(self, model, device='cpu', pos_weight=None, optimizer=None, criterion=None):
         self.model = model.to(device)
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
 
-        # Loss with imbalance handling
-        if pos_weight:
-            pw = torch.tensor([pos_weight], device=device)
-            self.criterion = nn.BCEWithLogitsLoss(pos_weight=pw)
+        if optimizer:
+            self.optimizer = optimizer
         else:
-            self.criterion = nn.BCEWithLogitsLoss()
+            self.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+
+        if criterion:
+            self.criterion = criterion
+        else:
+            # Loss with imbalance handling
+            if pos_weight:
+                if isinstance(pos_weight, (int, float)):
+                    pw = torch.tensor([pos_weight], device=device)
+                else:
+                    pw = pos_weight.to(device)
+                self.criterion = nn.BCEWithLogitsLoss(pos_weight=pw)
+            else:
+                self.criterion = nn.BCEWithLogitsLoss()
 
     def train_epoch(self, loader):
         self.model.train()
