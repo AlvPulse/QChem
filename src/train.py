@@ -1,104 +1,119 @@
 
-import os
 import torch
-import numpy as np
-from torch_geometric.loader import DataLoader
+import torch.nn as nn
 from sklearn.metrics import roc_auc_score, average_precision_score
+import numpy as np
+from tqdm import tqdm
 
 class Trainer:
-    def __init__(self, model, optimizer, criterion, device):
-        self.model = model
-        self.optimizer = optimizer
-        self.criterion = criterion
+    def __init__(self, model, device='cpu', pos_weight=None):
+        self.model = model.to(device)
         self.device = device
+        self.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+
+        # Loss with imbalance handling
+        if pos_weight:
+            pw = torch.tensor([pos_weight], device=device)
+            self.criterion = nn.BCEWithLogitsLoss(pos_weight=pw)
+        else:
+            self.criterion = nn.BCEWithLogitsLoss()
 
     def train_epoch(self, loader):
         self.model.train()
         total_loss = 0
-        all_y_true = []
-        all_y_scores = []
+        all_y, all_probs = [], []
 
         for batch in loader:
             batch = batch.to(self.device)
             self.optimizer.zero_grad()
-            logits = self.model(batch)
 
-            # Direct loss calculation assuming full labels
-            # logits: [batch, num_tasks], batch.y: [batch, num_tasks]
-            # BCEWithLogitsLoss with pos_weight=[num_tasks] handles this correctly
+            logits = self.model(batch)
             loss = self.criterion(logits, batch.y)
 
             loss.backward()
             self.optimizer.step()
 
             total_loss += loss.item()
+            all_y.extend(batch.y.cpu().numpy())
+            all_probs.extend(torch.sigmoid(logits).detach().cpu().numpy())
 
-            all_y_true.append(batch.y.detach().cpu().numpy())
-            all_y_scores.append(torch.sigmoid(logits).detach().cpu().numpy())
+        metrics = self.calculate_metrics(all_y, all_probs)
+        metrics['loss'] = total_loss / len(loader)
+        return metrics
 
-        avg_loss = total_loss / len(loader)
-        y_true = np.concatenate(all_y_true)
-        y_scores = np.concatenate(all_y_scores)
-
-        return avg_loss, y_true, y_scores
-
+    @torch.no_grad()
     def evaluate(self, loader):
         self.model.eval()
         total_loss = 0
-        all_y_true = []
-        all_y_scores = []
+        all_y, all_probs = [], []
 
-        with torch.no_grad():
-            for batch in loader:
-                batch = batch.to(self.device)
-                logits = self.model(batch)
-                loss = self.criterion(logits, batch.y)
-                total_loss += loss.item()
+        for batch in loader:
+            batch = batch.to(self.device)
+            logits = self.model(batch)
+            loss = self.criterion(logits, batch.y)
 
-                all_y_true.append(batch.y.detach().cpu().numpy())
-                all_y_scores.append(torch.sigmoid(logits).detach().cpu().numpy())
+            total_loss += loss.item()
+            all_y.extend(batch.y.cpu().numpy())
+            all_probs.extend(torch.sigmoid(logits).detach().cpu().numpy())
 
-        avg_loss = total_loss / len(loader)
-        y_true = np.concatenate(all_y_true)
-        y_scores = np.concatenate(all_y_scores)
+        metrics = self.calculate_metrics(all_y, all_probs)
+        metrics['loss'] = total_loss / len(loader)
+        return metrics
 
-        return avg_loss, y_true, y_scores
+    def calculate_metrics(self, y_true, y_prob):
+        y_true = np.array(y_true)
+        y_prob = np.array(y_prob)
+        # Handle edge cases with 1 class
+        if len(np.unique(y_true)) < 2:
+            return {'roc_auc': 0.5, 'pr_auc': 0.0}
 
-    def compute_metrics(self, y_true, y_scores):
-        # y_true: [N, num_tasks]
-        # Calculate per task and average
-        roc_list = []
-        pr_list = []
-        num_tasks = y_true.shape[1]
+        return {
+            'roc_auc': roc_auc_score(y_true, y_prob),
+            'pr_auc': average_precision_score(y_true, y_prob)
+        }
 
-        for i in range(num_tasks):
-            # Check if valid labels exist for this task
-            yt = y_true[:, i]
-            ys = y_scores[:, i]
-            # Ignore missing labels if we supported them, but here we assume filled or check.
-            # Only calculate if we have both classes
-            if len(np.unique(yt)) > 1:
-                roc_list.append(roc_auc_score(yt, ys))
-                pr_list.append(average_precision_score(yt, ys))
-            else:
-                # If only one class is present in the split for this task,
-                # we can't compute AUC.
-                pass
+def run_benchmark(model_type='classical', n_qubits=4, epochs=10):
+    from .data_loader import get_dataloaders
+    from .classical_gnn import ClassicalGNN
+    from .hybrid_model import HybridGNNVQC
 
-        mean_roc = np.mean(roc_list) if roc_list else 0.0
-        mean_pr = np.mean(pr_list) if pr_list else 0.0
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Running on {device} | Model: {model_type}")
 
-        # Fill missing tasks with 0 or nan for per-task list to align indices
-        roc_list_aligned = []
-        pr_list_aligned = []
-        for i in range(num_tasks):
-            yt = y_true[:, i]
-            ys = y_scores[:, i]
-            if len(np.unique(yt)) > 1:
-                roc_list_aligned.append(roc_auc_score(yt, ys))
-                pr_list_aligned.append(average_precision_score(yt, ys))
-            else:
-                roc_list_aligned.append(0.5) # Default/Neutral
-                pr_list_aligned.append(0.0)
+    # Load Data
+    train_loader, val_loader, test_loader, pos_weight = get_dataloaders(batch_size=32)
 
-        return mean_roc, mean_pr, roc_list_aligned, pr_list_aligned
+    # Init Model
+    if model_type == 'classical':
+        model = ClassicalGNN()
+    elif model_type == 'hybrid_linear':
+        model = HybridGNNVQC(n_qubits=n_qubits, reduction='linear', ansatz='strong')
+    elif model_type == 'hybrid_fft':
+        model = HybridGNNVQC(n_qubits=n_qubits, reduction='fft', ansatz='strong')
+    elif model_type == 'mps':
+        model = HybridGNNVQC(n_qubits=n_qubits, reduction='linear', ansatz='mps')
+    else:
+        raise ValueError("Unknown model type")
+
+    trainer = Trainer(model, device, pos_weight)
+
+    # Loop
+    best_val_roc = 0
+    for epoch in range(1, epochs+1):
+        tr_metrics = trainer.train_epoch(train_loader)
+        va_metrics = trainer.evaluate(val_loader)
+
+        print(f"Ep {epoch} | Tr Loss: {tr_metrics['loss']:.4f} ROC: {tr_metrics['roc_auc']:.3f} | "
+              f"Va Loss: {va_metrics['loss']:.4f} ROC: {va_metrics['roc_auc']:.3f}")
+
+        if va_metrics['roc_auc'] > best_val_roc:
+            best_val_roc = va_metrics['roc_auc']
+
+    # Final Test
+    te_metrics = trainer.evaluate(test_loader)
+    print(f"Final Test ROC: {te_metrics['roc_auc']:.4f} PR: {te_metrics['pr_auc']:.4f}")
+
+if __name__ == "__main__":
+    import sys
+    mode = sys.argv[1] if len(sys.argv) > 1 else 'classical'
+    run_benchmark(mode)
