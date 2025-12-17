@@ -85,13 +85,24 @@ def run_benchmark(model_type='classical', n_qubits=4, epochs=10):
 
     # Init Model
     if model_type == 'classical':
-        model = ClassicalGNN()
+        model = ClassicalGNN(gnn_type='gine', dropout=0.2)
+    elif model_type == 'classical_gat':
+        model = ClassicalGNN(gnn_type='gat', dropout=0.2)
     elif model_type == 'hybrid_linear':
-        model = HybridGNNVQC(n_qubits=n_qubits, reduction='linear', ansatz='strong')
+        model = HybridGNNVQC(n_qubits=n_qubits, reduction='linear', ansatz='strong', gnn_type='gine')
     elif model_type == 'hybrid_fft':
-        model = HybridGNNVQC(n_qubits=n_qubits, reduction='fft', ansatz='strong')
+        model = HybridGNNVQC(n_qubits=n_qubits, reduction='fft', ansatz='strong', gnn_type='gine')
     elif model_type == 'mps':
-        model = HybridGNNVQC(n_qubits=n_qubits, reduction='linear', ansatz='mps')
+        model = HybridGNNVQC(n_qubits=n_qubits, reduction='linear', ansatz='mps', gnn_type='gine')
+    elif model_type == 'hybrid_gat':
+        # GAT encoder + Linear Projection + Strong Entangling
+        model = HybridGNNVQC(n_qubits=n_qubits, reduction='linear', ansatz='strong', gnn_type='gat', dropout=0.2)
+    elif model_type == 'hybrid_reupload':
+        # GINE encoder + Linear + Reuploading VQC
+        model = HybridGNNVQC(n_qubits=n_qubits, q_layers=4, reduction='linear', ansatz='reupload', gnn_type='gine', dropout=0.2)
+    elif model_type == 'hybrid_gat_reupload':
+        # Best of both worlds?
+        model = HybridGNNVQC(n_qubits=n_qubits, q_layers=4, reduction='linear', ansatz='reupload', gnn_type='gat', dropout=0.2)
     else:
         raise ValueError("Unknown model type")
 
