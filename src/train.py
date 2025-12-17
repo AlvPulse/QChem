@@ -6,7 +6,7 @@ import numpy as np
 from tqdm import tqdm
 
 class Trainer:
-    def __init__(self, model, device='cpu', pos_weight=None, optimizer=None, criterion=None):
+    def __init__(self, model, optimizer=None, criterion=None, device='cpu', pos_weight=None):
         self.model = model.to(device)
         self.device = device
 
@@ -116,7 +116,7 @@ def run_benchmark(model_type='classical', n_qubits=4, epochs=10):
     else:
         raise ValueError("Unknown model type")
 
-    trainer = Trainer(model, device, pos_weight)
+    trainer = Trainer(model, device=device, pos_weight=pos_weight)
 
     # Loop
     best_val_roc = 0
