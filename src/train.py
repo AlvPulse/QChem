@@ -4,11 +4,13 @@ import torch.nn as nn
 from sklearn.metrics import roc_auc_score, average_precision_score
 import numpy as np
 from tqdm import tqdm
+from .loss import SupervisedContrastiveLoss
 
 class Trainer:
-    def __init__(self, model, optimizer=None, criterion=None, device='cpu', pos_weight=None):
+    def __init__(self, model, optimizer=None, criterion=None, device='cpu', pos_weight=None, contrastive_weight=0.0):
         self.model = model.to(device)
         self.device = device
+        self.contrastive_weight = contrastive_weight
 
         if optimizer:
             self.optimizer = optimizer
@@ -28,6 +30,9 @@ class Trainer:
             else:
                 self.criterion = nn.BCEWithLogitsLoss()
 
+        if contrastive_weight > 0:
+            self.contrastive_loss_fn = SupervisedContrastiveLoss()
+
     def train_epoch(self, loader):
         self.model.train()
         total_loss = 0
@@ -37,8 +42,24 @@ class Trainer:
             batch = batch.to(self.device)
             self.optimizer.zero_grad()
 
-            logits = self.model(batch)
-            loss = self.criterion(logits, batch.y)
+            if self.contrastive_weight > 0:
+                # Expecting model to support `return_embeddings`
+                embeddings = self.model(batch, return_embeddings=True)
+                # Re-run forward for logits (inefficient but safe without refactoring entire forward)
+                # Or better: `logits = self.model.final_head(embeddings)` if we knew the structure.
+                # Given `HybridGNNVQC` structure, logits = head(embeddings).
+                if hasattr(self.model, 'final_head'):
+                    logits = self.model.final_head(embeddings).squeeze(-1)
+                else:
+                    # Fallback for models without separated head (e.g. classical baseline if not updated)
+                    logits = self.model(batch)
+
+                ce_loss = self.criterion(logits, batch.y)
+                con_loss = self.contrastive_loss_fn(embeddings, batch.y)
+                loss = ce_loss + self.contrastive_weight * con_loss
+            else:
+                logits = self.model(batch)
+                loss = self.criterion(logits, batch.y)
 
             loss.backward()
             self.optimizer.step()
@@ -93,6 +114,8 @@ def run_benchmark(model_type='classical', n_qubits=4, epochs=10):
     # Load Data
     train_loader, val_loader, test_loader, pos_weight = get_dataloaders(batch_size=32)
 
+    contrastive_weight = 0.0
+
     # Init Model
     if model_type == 'classical':
         model = ClassicalGNN(gnn_type='gine', dropout=0.2)
@@ -113,10 +136,17 @@ def run_benchmark(model_type='classical', n_qubits=4, epochs=10):
     elif model_type == 'hybrid_gat_reupload':
         # Best of both worlds?
         model = HybridGNNVQC(n_qubits=n_qubits, q_layers=4, reduction='linear', ansatz='reupload', gnn_type='gat', dropout=0.2)
+    elif model_type == 'hybrid_residual':
+        # Hybrid GAT + Reuploading + Residual Connection
+        model = HybridGNNVQC(n_qubits=n_qubits, q_layers=4, reduction='linear', ansatz='reupload', gnn_type='gat', dropout=0.2, residual=True)
+    elif model_type == 'hybrid_contrastive':
+        # Hybrid GAT + Reuploading + Contrastive Loss
+        model = HybridGNNVQC(n_qubits=n_qubits, q_layers=4, reduction='linear', ansatz='reupload', gnn_type='gat', dropout=0.2)
+        contrastive_weight = 0.1
     else:
         raise ValueError("Unknown model type")
 
-    trainer = Trainer(model, device=device, pos_weight=pos_weight)
+    trainer = Trainer(model, device=device, pos_weight=pos_weight, contrastive_weight=contrastive_weight)
 
     # Loop
     best_val_roc = 0
