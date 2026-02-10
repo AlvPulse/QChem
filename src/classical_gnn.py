@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch_geometric.nn import GINEConv, GATv2Conv, GlobalAttention
+from torch_geometric.nn import GINEConv, GATv2Conv, AttentionalAggregation
 
 class GINEBlock(nn.Module):
     def __init__(self, hidden_dim, edge_emb_dim=8):
@@ -66,7 +66,7 @@ class ClassicalGNN(nn.Module):
 
         # Pooling
         self.gate_nn = nn.Sequential(nn.Linear(hidden_dim, 1))
-        self.readout = GlobalAttention(self.gate_nn)
+        self.readout = AttentionalAggregation(self.gate_nn)
 
         # Classification Head (for pure classical baseline)
         self.head = nn.Sequential(
