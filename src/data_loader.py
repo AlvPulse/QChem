@@ -10,6 +10,7 @@ import torch
 from torch_geometric.data import Data, InMemoryDataset
 from torch_geometric.loader import DataLoader
 from sklearn.model_selection import StratifiedKFold
+import ast
 
 # Constants
 SEED = 42
@@ -17,8 +18,11 @@ np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 def canonical_smiles(s):
-    m = Chem.MolFromSmiles(s)
-    return Chem.MolToSmiles(m) if m else None
+    try:
+        m = Chem.MolFromSmiles(s)
+        return Chem.MolToSmiles(m) if m else None
+    except:
+        return None
 
 def atom_features(atom):
     return np.array([
@@ -41,7 +45,10 @@ def bond_features(bond):
 def mol_to_pyg(smiles, y):
     m = Chem.MolFromSmiles(smiles)
     if m is None: return None
-    Chem.Kekulize(m, clearAromaticFlags=False)
+    try:
+        Chem.Kekulize(m, clearAromaticFlags=False)
+    except:
+        return None
 
     # Nodes
     x = np.vstack([atom_features(a) for a in m.GetAtoms()]).astype(np.int64)
@@ -60,7 +67,9 @@ def mol_to_pyg(smiles, y):
     edge_index = torch.tensor([ei_src, ei_dst], dtype=torch.long)
     edge_attr = torch.tensor(np.vstack(eattr), dtype=torch.long)
     x = torch.tensor(x, dtype=torch.long)
-    y = torch.tensor([y], dtype=torch.float32)
+
+    # y is expected to be a list/array of 12 floats (or NaNs)
+    y = torch.tensor(y, dtype=torch.float32).view(1, -1) # Shape (1, 12)
 
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
@@ -109,35 +118,43 @@ class Tox21GraphDataset(InMemoryDataset):
                 data_list.append(graph)
         return self.collate(data_list)
 
-def get_dataloaders(batch_size=64, task_name='SR-MMP'):
+def get_dataloaders(batch_size=64, root_dir='.'):
     # Load and preprocess
-    df = pd.read_csv("EDA_dataset.csv")
+    csv_path = os.path.join(root_dir, "EDA_dataset.csv")
+    if not os.path.exists(csv_path):
+        # Fallback for when running from src or other dirs, try to find it
+        if os.path.exists("EDA_dataset.csv"):
+             csv_path = "EDA_dataset.csv"
+        elif os.path.exists("../EDA_dataset.csv"):
+             csv_path = "../EDA_dataset.csv"
+        else:
+             raise FileNotFoundError("EDA_dataset.csv not found")
 
-    # Extract task label
-    # Note: 'label' column in CSV is string "[0. 0. ...]", need to parse
-    # Or rely on 'labels_SP_test' column logic from notebook if available
-    # Parsing strictly from the csv format:
-
-    # Mapping task to index (from notebook)
-    tox21_tasks=['NR-AR', 'NR-AR-LBD', 'NR-AhR', 'NR-Aromatase',
-                 'NR-ER', 'NR-ER-LBD', 'NR-PPAR-gamma',
-                 'SR-ARE', 'SR-ATAD5', 'SR-HSE', 'SR-MMP', 'SR-p53']
-    task_idx = tox21_tasks.index(task_name)
+    df = pd.read_csv(csv_path)
 
     def parse_label(l_str):
-        # Convert string representation of list to actual value
+        # Convert string representation "[0. 0. ...]" to list of floats
+        # Replace non-numeric values with NaN if any (though usually 0/1)
         try:
-            # Clean string like '[0. 0. ...]'
+            # Remove brackets and split by space
             vals = l_str.strip('[]').split()
-            return float(vals[task_idx])
+            # Convert to float, replacing '' with nan if needed
+            return [float(v) if v != '' else float('nan') for v in vals]
         except:
-            return float('nan')
+            return [float('nan')] * 12 # Assuming 12 tasks
 
     df['label'] = df['label'].apply(parse_label)
 
     # Clean
     df['smiles'] = df['smiles'].apply(canonical_smiles)
-    df = df.dropna(subset=['smiles', 'label']).drop_duplicates(subset=['smiles'])
+    # Remove rows where smiles failed
+    df = df.dropna(subset=['smiles'])
+    # Remove duplicates
+    df = df.drop_duplicates(subset=['smiles'])
+
+    # Verify label dimension (should be 12)
+    # Filter out rows with incorrect label length
+    df = df[df['label'].apply(len) == 12]
 
     # Scaffold Split
     tr_df, va_df, te_df = scaffold_split(df)
@@ -147,21 +164,32 @@ def get_dataloaders(batch_size=64, task_name='SR-MMP'):
     va_ds = Tox21GraphDataset('.', va_df)
     te_ds = Tox21GraphDataset('.', te_df)
 
-    # Loaders with Weighted Random Sampler for Train
-    y_tr = np.array([d.y.item() for d in tr_ds])
-    class_counts = np.bincount(y_tr.astype(int))
-    # Handle potentially missing classes in small subsets, though unlikely in train
-    if len(class_counts) < 2: class_counts = np.array([1, 1])
+    # Calculate pos_weights for all 12 tasks
+    # Iterate over training data to count positives and negatives per task
+    all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, 12)
 
-    weights = 1. / class_counts
-    samples_weights = weights[y_tr.astype(int)]
-    sampler = torch.utils.data.WeightedRandomSampler(samples_weights, len(samples_weights))
+    pos_weights = []
+    for i in range(12):
+        y_task = all_y_tr[:, i]
+        # Ignore NaNs
+        valid_mask = ~np.isnan(y_task)
+        if valid_mask.sum() > 0:
+            y_valid = y_task[valid_mask]
+            n_pos = (y_valid == 1).sum()
+            n_neg = (y_valid == 0).sum()
+            weight = n_neg / max(n_pos, 1)
+        else:
+            weight = 1.0
+        pos_weights.append(weight)
 
-    train_loader = DataLoader(tr_ds, batch_size=batch_size, sampler=sampler)
+    pos_weights = torch.tensor(pos_weights, dtype=torch.float32)
+
+    # Note: WeightedRandomSampler is tricky with multi-task.
+    # Usually standard shuffling is used, or a sampler based on the presence of ANY active task.
+    # For now, we use standard shuffling for train_loader.
+
+    train_loader = DataLoader(tr_ds, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(va_ds, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(te_ds, batch_size=batch_size, shuffle=False)
 
-    # Calculate pos_weight for loss function
-    pos_weight = class_counts[0] / max(class_counts[1], 1)
-
-    return train_loader, val_loader, test_loader, pos_weight
+    return train_loader, val_loader, test_loader, pos_weights

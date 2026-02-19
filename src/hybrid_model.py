@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.fft
 import torch.nn.functional as F
 from .classical_gnn import ClassicalGNN
-from .quantum_layers import QuantumLayer
+from .quantum_layers import QuantumLayer, QuantumEnsemble
 
 class HybridGNNVQC(nn.Module):
     def __init__(self, n_qubits=4, q_layers=2, reduction='linear', ansatz='strong', gnn_type='gine', dropout=0.2):
@@ -57,3 +57,47 @@ class HybridGNNVQC(nn.Module):
         # 4. Final Prediction
         logits = self.final_head(q_out)
         return logits.squeeze(-1)
+
+class HybridEnsembleVQC(nn.Module):
+    def __init__(self, n_estimators=4, n_qubits_per_est=4, q_layers=2, ansatz='strong', gnn_type='gine', dropout=0.2, split_input=True, n_outputs=12):
+        super().__init__()
+
+        self.gnn = ClassicalGNN(gnn_type=gnn_type, dropout=dropout, out_dim=n_outputs)
+        # Note: out_dim in ClassicalGNN is for its own head, which we ignore.
+
+        # Determine latent dimension
+        if split_input:
+            self.latent_dim = n_estimators * n_qubits_per_est
+        else:
+            self.latent_dim = n_qubits_per_est
+
+        # Projection Head
+        # Maps GNN hidden dim (64) to latent dim
+        self.projection = nn.Sequential(
+            nn.Linear(self.gnn.hidden_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, self.latent_dim)
+        )
+
+        # Quantum Ensemble
+        self.ensemble = QuantumEnsemble(
+            input_dim=self.latent_dim,
+            n_estimators=n_estimators,
+            n_qubits_per_est=n_qubits_per_est,
+            n_layers=q_layers,
+            ansatz=ansatz,
+            n_outputs=n_outputs,
+            split_input=split_input
+        )
+
+    def forward(self, data):
+        # 1. Encode Graph
+        graph_emb = self.gnn.forward_features(data) # (batch, 64)
+
+        # 2. Project to Latent Space
+        latent = self.projection(graph_emb) # (batch, latent_dim)
+
+        # 3. Quantum Ensemble
+        logits, _ = self.ensemble(latent) # (batch, n_outputs)
+
+        return logits, latent
