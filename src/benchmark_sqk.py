@@ -8,11 +8,11 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.svm import SVC
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.metrics.pairwise import rbf_kernel
-from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
+from scipy.stats import pointbiserialr
 
-from quantum.kernel import StructuredQuantumKernel
-from features.heterogeneous import extract_all_heterogeneous_features
+from src.quantum.kernel import StructuredQuantumKernel
+from src.features.heterogeneous import extract_all_heterogeneous_features, extract_all_maccs
 
 def parse_label(l_str):
     try:
@@ -66,24 +66,50 @@ def main():
     smiles_list = df_sub['smiles'].tolist()
     labels = np.array(df_sub['label_parsed'].tolist())
 
-    print("Extracting S, M, D features...")
-    X_S, X_M, X_D = extract_all_heterogeneous_features(smiles_list)
+    print("Computing MACCS Keys correlations for feature selection...")
+    # Compute full MACCS keys for all molecules to select the top 5 correlated
+    maccs_full = np.array([extract_all_maccs(s) for s in smiles_list])
 
-    X_S_np = X_S.numpy()
+    n_maccs = maccs_full.shape[1]
+    n_tasks = labels.shape[1]
+
+    # Compute average absolute point-biserial correlation across all tasks
+    avg_corrs = np.zeros(n_maccs)
+    for i in range(n_maccs):
+        feat = maccs_full[:, i]
+        corrs = []
+        for t in range(n_tasks):
+            y_t = labels[:, t]
+            valid_mask = ~np.isnan(y_t)
+            y_valid = y_t[valid_mask]
+            f_valid = feat[valid_mask]
+
+            if len(np.unique(y_valid)) > 1 and np.std(f_valid) > 0:
+                corr, _ = pointbiserialr(f_valid, y_valid)
+                if not np.isnan(corr):
+                    corrs.append(abs(corr))
+        if corrs:
+            avg_corrs[i] = np.mean(corrs)
+
+    # Select top 5 features
+    top_5_maccs_indices = np.argsort(avg_corrs)[-5:][::-1]
+    print(f"Selected MACCS Keys: {top_5_maccs_indices}")
+
+    print("Extracting S, M, D features...")
+    X_S_vals, X_S_vecs, X_M, X_D = extract_all_heterogeneous_features(smiles_list, motif_selected_indices=top_5_maccs_indices)
+
+    X_S_np = X_S_vals.numpy()
     X_M_np = X_M.numpy()
     X_D_np = X_D.numpy()
 
-    # Deterministic Projection and Scaling
-    print("Applying PCA and Scaling...")
-    pca = PCA(n_components=5, random_state=42)
-    X_M_5d = pca.fit_transform(X_M_np)
-
+    # Scaling
+    print("Applying Scaling...")
     scaler_S = StandardScaler()
     scaler_M = StandardScaler()
     scaler_D = StandardScaler()
 
     X_S_5d = scaler_S.fit_transform(X_S_np)
-    X_M_5d = scaler_M.fit_transform(X_M_5d)
+    X_M_5d = scaler_M.fit_transform(X_M_np)
     X_D_5d = scaler_D.fit_transform(X_D_np)
 
     # Instantiate Quantum Kernel Module (without random projections)
@@ -99,8 +125,8 @@ def main():
         ts_M = torch.tensor(X_M_5d, dtype=torch.float32)
         ts_D = torch.tensor(X_D_5d, dtype=torch.float32)
 
-        for i in range(0, len(X_S), batch_size):
-            qfm_batch = sqk(ts_S[i:i+batch_size], ts_M[i:i+batch_size], ts_D[i:i+batch_size])
+        for i in range(0, len(X_S_vals), batch_size):
+            qfm_batch = sqk(ts_S[i:i+batch_size], X_S_vecs[i:i+batch_size], ts_M[i:i+batch_size], ts_D[i:i+batch_size])
             qfm_list.append(qfm_batch)
         QFM_features = torch.cat(qfm_list, dim=0).numpy()
 
@@ -108,10 +134,22 @@ def main():
     print("Computing Kernel Matrices...")
 
     # 1. Quantum Kernel (Linear on QFM)
-    K_quantum = QFM_features @ QFM_features.T
+    # The quantum feature map maps inputs to expectation values. We construct
+    # the kernel explicitly by taking the RBF on these observable representations.
+    # A simple dot product often struggles if observables are constrained to narrow bands.
+    gamma_q = 1.0 / (QFM_features.shape[1] * QFM_features.var()) if QFM_features.var() > 0 else 1.0
+    K_quantum = rbf_kernel(QFM_features, gamma=gamma_q)
 
-    # 2. Classical RBF on Full 1034D Concatenated (Upper Bound baseline)
-    X_concat_full = np.concatenate([X_S_np, X_M_np, X_D_np], axis=1)
+    # Check kernel concentration diagnostic
+    k_triu = K_quantum[np.triu_indices_from(K_quantum, k=1)]
+    k_std = np.std(k_triu)
+    print(f"\n[Diagnostic] Quantum Kernel Std Dev (Concentration): {k_std:.4f}")
+    if k_std < 0.05:
+        print("  -> Warning: Kernel is highly concentrated (std < 0.05). SVM might struggle to separate classes.")
+
+    # 2. Classical RBF on Full Concatenated (Upper Bound baseline)
+    # We now use the raw 167 MACCS features + 5 S + 5 D = 177D
+    X_concat_full = np.concatenate([X_S_np, maccs_full, X_D_np], axis=1)
     gamma_full = 1.0 / (X_concat_full.shape[1] * X_concat_full.var()) if X_concat_full.var() > 0 else 1.0
     K_concat_full = rbf_kernel(X_concat_full, gamma=gamma_full)
 

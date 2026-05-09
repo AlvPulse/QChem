@@ -16,46 +16,49 @@ class StructuredQuantumKernel(nn.Module):
 
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
+        torch.manual_seed(42)
+        self.w1 = nn.Parameter(torch.randn(1, n_qubits, 3), requires_grad=False)
+        self.w2 = nn.Parameter(torch.randn(1, n_qubits, 3), requires_grad=False)
+        self.w3 = nn.Parameter(torch.randn(1, n_qubits, 3), requires_grad=False)
+
         @qml.qnode(self.dev, interface="torch")
-        def qfm_circuit(x_S, x_M, x_D):
-            # Block 1 (U_S): Angle encode x_S using Ry gates + CNOT ring
+        def qfm_circuit(x_S, x_M, x_D, eigenvecs):
+            # Block 1: Spectral encoding
             for i in range(n_qubits):
-                qml.RY(x_S[i], wires=i)
-            for i in range(n_qubits):
-                qml.CNOT(wires=[i, (i+1) % n_qubits])
+                qml.RZ(x_S[i], wires=i)
+            qml.StronglyEntanglingLayers(self.w1, wires=range(n_qubits))
 
-            # Block 2 (U_M): Angle encode x_M using Rz gates + CNOT ring
+            # Block 2: Spectral-modulated motif encoding
+            modulated_angles = torch.mv(eigenvecs, x_M) * (torch.pi / 4.0)
             for i in range(n_qubits):
-                qml.RZ(x_M[i], wires=i)
-            for i in range(n_qubits):
-                qml.CNOT(wires=[i, (i+1) % n_qubits])
+                qml.RX(modulated_angles[i], wires=i)
+            qml.StronglyEntanglingLayers(self.w2, wires=range(n_qubits))
 
-            # Block 3 (U_D): Angle encode x_D using Ry gates + CNOT ring
+            # Block 3: Diffusion encoding
             for i in range(n_qubits):
                 qml.RY(x_D[i], wires=i)
-            for i in range(n_qubits):
-                qml.CNOT(wires=[i, (i+1) % n_qubits])
+            qml.StronglyEntanglingLayers(self.w3, wires=range(n_qubits))
 
-            # Local Paulis: <X_i>, <Y_i>, <Z_i>
+            # Measure full set of observables
             observables = []
             for i in range(n_qubits):
                 observables.append(qml.expval(qml.PauliX(i)))
                 observables.append(qml.expval(qml.PauliY(i)))
                 observables.append(qml.expval(qml.PauliZ(i)))
-
-            # Correlators: <Z_i Z_{i+1}>
             for i in range(n_qubits):
-                observables.append(qml.expval(qml.PauliZ(i) @ qml.PauliZ((i+1) % n_qubits)))
-
+                observables.append(qml.expval(
+                    qml.PauliZ(i) @ qml.PauliZ((i+1) % n_qubits)
+                ))
             return observables
 
         self.qnode = qfm_circuit
 
-    def forward(self, x_S, x_M, x_D):
+    def forward(self, x_S_vals, x_S_vecs, x_M, x_D):
         """
-        Computes the Quantum Feature Map (QFM) vector.
+        Computes the Quantum Feature Map (QFM) vector using spectral-modulated encoding.
         Inputs:
-            x_S: (B, s_dim) - Spectral features
+            x_S_vals: (B, s_dim) - Spectral features (eigenvalues)
+            x_S_vecs: (B, s_dim, s_dim) - Spectral features (eigenvectors)
             x_M: (B, m_dim) - Motif features
             x_D: (B, d_dim) - Diffusion features
         Output:
@@ -63,24 +66,33 @@ class StructuredQuantumKernel(nn.Module):
         """
         # Project to 5D
         if self.use_projections:
-            p_S = self.proj_S(x_S)
+            p_S = self.proj_S(x_S_vals)
             p_M = self.proj_M(x_M)
             p_D = self.proj_D(x_D)
         else:
-            p_S = x_S
+            p_S = x_S_vals
             p_M = x_M
             p_D = x_D
 
-        # Scale inputs (Optional: Apply activation like tanh or clamp)
-        # Using tanh ensures angles are in [-pi, pi]
-        p_S = torch.tanh(p_S) * torch.pi
-        p_M = torch.tanh(p_M) * torch.pi
-        p_D = torch.tanh(p_D) * torch.pi
+        # Phase scaling is crucial
+        # Features are Standardized to mean 0, variance 1.
+        # Scale to max absolute angle ~pi/2
+        p_S = p_S * (torch.pi / 4.0)
+        p_D = p_D * (torch.pi / 4.0)
+        # Note: p_M is not scaled here because it is modulated inside the circuit.
 
-        batch_size = x_S.size(0)
+        # We need the eigenvectors themselves to be properly scaled so they don't blow up the dot product
+        # x_S_vecs has shape (B, 5, 5).
+        # L2 normalize eigenvectors per graph just to be safe
+        norms = torch.linalg.norm(x_S_vecs, dim=1, keepdim=True)
+        # Avoid div by 0
+        norms = torch.where(norms == 0, torch.ones_like(norms), norms)
+        p_vecs = x_S_vecs / norms
+
+        batch_size = x_S_vals.size(0)
         qfm_outputs = []
         for i in range(batch_size):
-            res = self.qnode(p_S[i], p_M[i], p_D[i])
+            res = self.qnode(p_S[i], p_M[i], p_D[i], p_vecs[i])
             qfm_outputs.append(torch.stack(res))
 
         return torch.stack(qfm_outputs)
