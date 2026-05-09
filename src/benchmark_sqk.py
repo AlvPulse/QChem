@@ -8,6 +8,8 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.svm import SVC
 from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.metrics.pairwise import rbf_kernel
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 
 from src.quantum.kernel import StructuredQuantumKernel
 from src.features.heterogeneous import extract_all_heterogeneous_features
@@ -67,54 +69,76 @@ def main():
     print("Extracting S, M, D features...")
     X_S, X_M, X_D = extract_all_heterogeneous_features(smiles_list)
 
-    # Instantiate Quantum Kernel Module
-    sqk = StructuredQuantumKernel(s_dim=5, m_dim=128, d_dim=5, n_qubits=5)
-
-    print("Generating Quantum Feature Map vectors (this may take a few minutes)...")
-    with torch.no_grad():
-        # Batching because quantum simulation can be memory intensive
-        batch_size = 100
-        qfm_list = []
-        for i in range(0, len(X_S), batch_size):
-            qfm_batch = sqk(X_S[i:i+batch_size], X_M[i:i+batch_size], X_D[i:i+batch_size])
-            qfm_list.append(qfm_batch)
-        QFM_features = torch.cat(qfm_list, dim=0).numpy()
-
-    # Convert features to numpy for classical baselines
     X_S_np = X_S.numpy()
     X_M_np = X_M.numpy()
     X_D_np = X_D.numpy()
+
+    # Deterministic Projection and Scaling
+    print("Applying PCA and Scaling...")
+    pca = PCA(n_components=5, random_state=42)
+    X_M_5d = pca.fit_transform(X_M_np)
+
+    scaler_S = StandardScaler()
+    scaler_M = StandardScaler()
+    scaler_D = StandardScaler()
+
+    X_S_5d = scaler_S.fit_transform(X_S_np)
+    X_M_5d = scaler_M.fit_transform(X_M_5d)
+    X_D_5d = scaler_D.fit_transform(X_D_np)
+
+    # Instantiate Quantum Kernel Module (without random projections)
+    sqk = StructuredQuantumKernel(s_dim=5, m_dim=5, d_dim=5, n_qubits=5, use_projections=False)
+
+    print("Generating Quantum Feature Map vectors (this may take a few minutes)...")
+    with torch.no_grad():
+        batch_size = 100
+        qfm_list = []
+
+        # Convert back to torch
+        ts_S = torch.tensor(X_S_5d, dtype=torch.float32)
+        ts_M = torch.tensor(X_M_5d, dtype=torch.float32)
+        ts_D = torch.tensor(X_D_5d, dtype=torch.float32)
+
+        for i in range(0, len(X_S), batch_size):
+            qfm_batch = sqk(ts_S[i:i+batch_size], ts_M[i:i+batch_size], ts_D[i:i+batch_size])
+            qfm_list.append(qfm_batch)
+        QFM_features = torch.cat(qfm_list, dim=0).numpy()
 
     # --- Kernels ---
     print("Computing Kernel Matrices...")
 
     # 1. Quantum Kernel (Linear on QFM)
-    # Since QFM explicitly maps to a Hilbert space representation, the kernel is the inner product.
     K_quantum = QFM_features @ QFM_features.T
 
-    # 2. Classical RBF on Concatenated
-    X_concat = np.concatenate([X_S_np, X_M_np, X_D_np], axis=1)
-    gamma_concat = 1.0 / (X_concat.shape[1] * X_concat.var()) if X_concat.var() > 0 else 1.0
-    K_concat = rbf_kernel(X_concat, gamma=gamma_concat)
+    # 2. Classical RBF on Full 1034D Concatenated (Upper Bound baseline)
+    X_concat_full = np.concatenate([X_S_np, X_M_np, X_D_np], axis=1)
+    gamma_full = 1.0 / (X_concat_full.shape[1] * X_concat_full.var()) if X_concat_full.var() > 0 else 1.0
+    K_concat_full = rbf_kernel(X_concat_full, gamma=gamma_full)
 
-    # 3. Additive RBF
-    gamma_S = 1.0 / (X_S_np.shape[1] * X_S_np.var()) if X_S_np.var() > 0 else 1.0
-    gamma_M = 1.0 / (X_M_np.shape[1] * X_M_np.var()) if X_M_np.var() > 0 else 1.0
-    gamma_D = 1.0 / (X_D_np.shape[1] * X_D_np.var()) if X_D_np.var() > 0 else 1.0
+    # 3. Classical RBF on Reduced 15D Concatenated (Fair comparison)
+    X_concat_15d = np.concatenate([X_S_5d, X_M_5d, X_D_5d], axis=1)
+    gamma_15d = 1.0 / (X_concat_15d.shape[1] * X_concat_15d.var()) if X_concat_15d.var() > 0 else 1.0
+    K_concat_15d = rbf_kernel(X_concat_15d, gamma=gamma_15d)
 
-    K_S = rbf_kernel(X_S_np, gamma=gamma_S)
-    K_M = rbf_kernel(X_M_np, gamma=gamma_M)
-    K_D = rbf_kernel(X_D_np, gamma=gamma_D)
+    # 4. Additive RBF (Reduced)
+    gamma_S = 1.0 / (X_S_5d.shape[1] * X_S_5d.var()) if X_S_5d.var() > 0 else 1.0
+    gamma_M = 1.0 / (X_M_5d.shape[1] * X_M_5d.var()) if X_M_5d.var() > 0 else 1.0
+    gamma_D = 1.0 / (X_D_5d.shape[1] * X_D_5d.var()) if X_D_5d.var() > 0 else 1.0
+
+    K_S = rbf_kernel(X_S_5d, gamma=gamma_S)
+    K_M = rbf_kernel(X_M_5d, gamma=gamma_M)
+    K_D = rbf_kernel(X_D_5d, gamma=gamma_D)
     K_add = K_S + K_M + K_D
 
-    # 4. Multiplicative RBF
+    # 5. Multiplicative RBF (Reduced)
     K_mult = K_S * K_M * K_D
 
     kernels = {
         'Quantum (SQK)': K_quantum,
-        'Classical RBF (Concat)': K_concat,
-        'Classical RBF (Additive)': K_add,
-        'Classical RBF (Multiplicative)': K_mult
+        'Classical RBF (Full Concat)': K_concat_full,
+        'Classical RBF (Reduced Concat)': K_concat_15d,
+        'Classical RBF (Reduced Additive)': K_add,
+        'Classical RBF (Reduced Multiplicative)': K_mult
     }
 
     # --- Evaluation ---
