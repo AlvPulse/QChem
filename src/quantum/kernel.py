@@ -3,14 +3,16 @@ import torch
 import torch.nn as nn
 
 class StructuredQuantumKernel(nn.Module):
-    def __init__(self, s_dim, m_dim, d_dim, n_qubits=5):
+    def __init__(self, s_dim, m_dim, d_dim, n_qubits=5, use_projections=True):
         super().__init__()
         self.n_qubits = n_qubits
+        self.use_projections = use_projections
 
         # Projections to 5D
-        self.proj_S = nn.Linear(s_dim, n_qubits)
-        self.proj_M = nn.Linear(m_dim, n_qubits)
-        self.proj_D = nn.Linear(d_dim, n_qubits)
+        if self.use_projections:
+            self.proj_S = nn.Linear(s_dim, n_qubits)
+            self.proj_M = nn.Linear(m_dim, n_qubits)
+            self.proj_D = nn.Linear(d_dim, n_qubits)
 
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
@@ -60,11 +62,17 @@ class StructuredQuantumKernel(nn.Module):
             qfm: (B, 20) - Quantum feature map vector
         """
         # Project to 5D
-        p_S = self.proj_S(x_S)
-        p_M = self.proj_M(x_M)
-        p_D = self.proj_D(x_D)
+        if self.use_projections:
+            p_S = self.proj_S(x_S)
+            p_M = self.proj_M(x_M)
+            p_D = self.proj_D(x_D)
+        else:
+            p_S = x_S
+            p_M = x_M
+            p_D = x_D
 
         # Scale inputs (Optional: Apply activation like tanh or clamp)
+        # Using tanh ensures angles are in [-pi, pi]
         p_S = torch.tanh(p_S) * torch.pi
         p_M = torch.tanh(p_M) * torch.pi
         p_D = torch.tanh(p_D) * torch.pi

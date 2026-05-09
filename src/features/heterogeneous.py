@@ -41,7 +41,7 @@ def extract_spectral_features(smiles, top_k=5):
 
     return torch.tensor(feat, dtype=torch.float32)
 
-def extract_motif_features(smiles, n_bits=128):
+def extract_motif_features(smiles, n_bits=1024):
     """
     Extracts Morgan Fingerprint (Radius 2).
     Returns a 1D tensor of size n_bits.
