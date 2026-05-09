@@ -10,6 +10,8 @@ from src.train import Trainer
 from src.hybrid_model import HybridEnsembleVQC
 from src.baselines import HybridClassicalEnsemble, run_rf_baseline
 from src.classical_gnn import ClassicalGNN
+from src.models.structured_kernel import HybridStructuredQGNN 
+from src.quantum.diagnostics import compute_gram_matrix, analyze_kernel_variance
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -21,7 +23,7 @@ def set_seed(seed=42):
 def main():
     parser = argparse.ArgumentParser(description="Run Tox21 Experiments")
     parser.add_argument('--model', type=str, default='hybrid_ensemble',
-                        choices=['hybrid_ensemble', 'classical_ensemble', 'rf', 'classical_gnn'])
+                        choices=['hybrid_ensemble', 'classical_ensemble', 'rf', 'classical_gnn','hybrid_kernel'])
     parser.add_argument('--estimators', type=int, default=4, help='Number of estimators in ensemble')
     parser.add_argument('--qubits', type=int, default=4, help='Number of qubits per estimator')
     parser.add_argument('--layers', type=int, default=2, help='Number of quantum layers per estimator')
@@ -33,6 +35,7 @@ def main():
     parser.add_argument('--no-split', action='store_false', dest='split', help='Copy latent vector to estimators')
     parser.add_argument('--gnn', type=str, default='gine', choices=['gine', 'gat'])
     parser.add_argument('--dropout', type=float, default=0.2)
+    parser.add_argument('--diagnose', action='store_true', help='Run kernel diagnostics before training')
 
     args = parser.parse_args()
 
@@ -76,9 +79,28 @@ def main():
             dropout=args.dropout,
             out_dim=12
         )
+    # --- NEW MODEL CASE ---
+    elif args.model == 'hybrid_kernel':
+        print(f"Initializing Structured Quantum Kernel with {args.qubits} qubits...")
+        model = HybridStructuredQGNN(
+            num_tasks=12,
+            hidden=64, 
+            n_qubits=args.qubits
+        )
     else:
         raise ValueError(f"Unknown model: {args.model}")
 
+    model.to(device)
+    
+    # --- OPTIONAL DIAGNOSTICS ---
+    if args.model == 'hybrid_kernel' and args.diagnose:
+        print("Running Pre-train Diagnostics...")
+        model.eval()
+        sample_batch = next(iter(val_loader)).to(device)
+        with torch.no_grad():
+            _, q_features = model(sample_batch)
+        gram = compute_gram_matrix(q_features)
+        analyze_kernel_variance(gram)
     # Train
     print(f"Model Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     trainer = Trainer(model, device=device, pos_weight=pos_weight, alpha=args.alpha)
