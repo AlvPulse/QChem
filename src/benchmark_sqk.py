@@ -11,8 +11,8 @@ from sklearn.metrics.pairwise import rbf_kernel
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
-from src.quantum.kernel import StructuredQuantumKernel
-from src.features.heterogeneous import extract_all_heterogeneous_features
+from quantum.kernel import StructuredQuantumKernel
+from features.heterogeneous import extract_all_heterogeneous_features
 
 def parse_label(l_str):
     try:
