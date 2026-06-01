@@ -1,4 +1,3 @@
-
 import argparse
 import torch
 import numpy as np
@@ -13,6 +12,13 @@ from src.classical_gnn import ClassicalGNN
 from src.models.structured_kernel import HybridStructuredQGNN 
 from src.quantum.diagnostics import compute_gram_matrix, analyze_kernel_variance
 
+# Import new levels
+from src.quantum_levels import (
+    Level1Classical, Level1Quantum,
+    Level2Classical, Level2Quantum,
+    Level3Classical, Level3Quantum
+)
+
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -23,7 +29,12 @@ def set_seed(seed=42):
 def main():
     parser = argparse.ArgumentParser(description="Run Tox21 Experiments")
     parser.add_argument('--model', type=str, default='hybrid_ensemble',
-                        choices=['hybrid_ensemble', 'classical_ensemble', 'rf', 'classical_gnn','hybrid_kernel'])
+                        choices=[
+                            'hybrid_ensemble', 'classical_ensemble', 'rf', 'classical_gnn', 'hybrid_kernel',
+                            'level1_classical', 'level1_quantum',
+                            'level2_classical', 'level2_quantum',
+                            'level3_classical', 'level3_quantum'
+                        ])
     parser.add_argument('--estimators', type=int, default=4, help='Number of estimators in ensemble')
     parser.add_argument('--qubits', type=int, default=4, help='Number of qubits per estimator')
     parser.add_argument('--layers', type=int, default=2, help='Number of quantum layers per estimator')
@@ -67,7 +78,7 @@ def main():
     elif args.model == 'classical_ensemble':
         model = HybridClassicalEnsemble(
             n_estimators=args.estimators,
-            n_qubits_per_est=args.qubits, # uses this to determine latent dim size
+            n_qubits_per_est=args.qubits,
             gnn_type=args.gnn,
             dropout=args.dropout,
             split_input=args.split,
@@ -79,7 +90,6 @@ def main():
             dropout=args.dropout,
             out_dim=12
         )
-    # --- NEW MODEL CASE ---
     elif args.model == 'hybrid_kernel':
         print(f"Initializing Structured Quantum Kernel with {args.qubits} qubits...")
         model = HybridStructuredQGNN(
@@ -87,6 +97,19 @@ def main():
             hidden=64, 
             n_qubits=args.qubits
         )
+    # --- NEW LEVELS ---
+    elif args.model == 'level1_classical':
+        model = Level1Classical(hidden_dim=64, out_dim=12, dropout=args.dropout)
+    elif args.model == 'level1_quantum':
+        model = Level1Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=12, dropout=args.dropout)
+    elif args.model == 'level2_classical':
+        model = Level2Classical(hidden_dim=64, out_dim=12, dropout=args.dropout)
+    elif args.model == 'level2_quantum':
+        model = Level2Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=12, dropout=args.dropout)
+    elif args.model == 'level3_classical':
+        model = Level3Classical(hidden_dim=64, out_dim=12, dropout=args.dropout)
+    elif args.model == 'level3_quantum':
+        model = Level3Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=12, dropout=args.dropout)
     else:
         raise ValueError(f"Unknown model: {args.model}")
 
@@ -101,6 +124,7 @@ def main():
             _, q_features = model(sample_batch)
         gram = compute_gram_matrix(q_features)
         analyze_kernel_variance(gram)
+
     # Train
     print(f"Model Parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
     trainer = Trainer(model, device=device, pos_weight=pos_weight, alpha=args.alpha)
@@ -116,8 +140,6 @@ def main():
 
         if va_metrics['roc_auc'] > best_val_roc:
             best_val_roc = va_metrics['roc_auc']
-            # Save best model if needed
-            # torch.save(model.state_dict(), f"best_model_{args.model}.pt")
 
     # Final Test
     print("Evaluating on Test Set...")

@@ -1,50 +1,45 @@
 # Hybrid Quantum-Classical Graph Neural Network for Tox21 Toxicity Prediction
 
-This repository implements a novel **Hybrid Ensemble VQC (Variational Quantum Classifier)** architecture designed for **Multi-Task Toxicity Prediction** on the Tox21 dataset. The model is specifically engineered for **NISQ (Noisy Intermediate-Scale Quantum)** devices, focusing on circuit depth reduction, robustness, and information efficiency.
-
-## Key Features
-
-### 1. "Random Forest of QNNs" Architecture
-Instead of a single deep quantum circuit (which suffers from noise and vanishing gradients), we employ an **Ensemble of Shallow Quantum Estimators**.
-*   **Mechanism:** The latent space from the classical GNN is split (or copied) and fed into multiple independent, shallow quantum circuits (2-4 qubits, 1-2 layers).
-*   **Benefit:** Drastically reduces circuit depth while maintaining expressivity through ensembling. This is inherently more noise-resilient than standard VQCs.
-
-### 2. Intelligent Information Compression (Supervised Contrastive Loss)
-To maximize the utility of the limited qubit space, we implement a **Supervised Contrastive Loss** as an auxiliary objective.
-*   **Goal:** Force the classical encoder to map molecules with similar toxicity profiles to similar regions in the quantum latent space *before* quantum processing.
-*   **Benefit:** The quantum circuit receives a "clean," high-density representation, effectively acting as a high-performance classifier on optimized features.
-
-### 3. Multi-Task Learning
-The model predicts **all 12 Tox21 tasks** simultaneously.
-*   **Handling Missing Data:** A custom `MaskedBCEWithLogitsLoss` is used to handle the sparse nature of the dataset (many molecules have labels for only a subset of tasks).
-*   **Imbalance Handling:** Dynamic positive weighting is applied per task.
-
-### 4. Hardware-Efficient Ansatz (HEA)
-The quantum circuits utilize a hardware-efficient ansatz (Rotations + CNOT Ring) to minimize gate overhead, making the model suitable for near-term quantum hardware execution.
+This repository demonstrates the evolutionary development of a novel Quantum Machine Learning architecture for **Multi-Task Toxicity Prediction** on the Tox21 dataset. We step from basic Exploratory Data Analysis, through classical GNN baselines, and advance to deep Quantum Inductive Biases, showing a clear trajectory from "just using a quantum circuit" to "encoding chemical geometry into quantum operator geometry."
 
 ---
 
-## Architecture Diagram
+## Evolutionary Trajectory & Project Structure
 
-```
-[Molecule Graph]
-      |
-[Classical GNN Encoder (GINE/GAT)] --> Extracts Structural Features
-      |
-[Projection Head (MLP)] --> Compresses to Latent Space (e.g., 16 dims)
-      |
-      +---> [Supervised Contrastive Loss] (Auxiliary Training Signal)
-      |
-[Split/Copy] --> [Chunk 1] [Chunk 2] [Chunk 3] [Chunk 4]
-                    |         |         |         |
-              [Q-Est 1] [Q-Est 2] [Q-Est 3] [Q-Est 4] (Shallow Quantum Circuits)
-                    |         |         |         |
-              [Linear]  [Linear]  [Linear]  [Linear]
-                    |         |         |         |
-                    +---------+---------+---------+
-                              |
-                        [Aggregation] --> [12 Task Predictions]
-```
+The project is structured to demonstrate an incremental buildup:
+
+### Step 1: Exploratory Data Analysis (EDA)
+*   **Files:** `DatasetEDA.ipynb`, `EDA_dataset.csv`
+*   **Description:** Initial analysis of the Tox21 dataset, covering class imbalance, task correlations, and the sparsity (NaN labels) present across the 12 tasks.
+
+### Step 2: Feature Extraction Pipeline
+*   **Files:** `src/data_loader.py`
+*   **Description:** Processing SMILES strings into PyTorch Geometric graphs, extracting node (atom) and edge (bond) features, and applying scaffold splitting.
+
+### Step 3: Classical End-to-End Baselines
+*   **Files:** `src/classical_gnn.py`, `src/baselines.py`, `run_classical.py`
+*   **Description:** Implementation of standard GINE/GATv2 networks and Random Forests (using Morgan Fingerprints) to establish a strong classical baseline for the multi-task problem.
+
+### Step 4: Hybrid End-to-End VQC (The Initial Ansatz)
+*   **Files:** `src/hybrid_model.py`, `src/quantum_layers.py`, `run_quantum.py`
+*   **Description:** Our initial attempt at quantum advantage: A "Random Forest of QNNs" (Hybrid Ensemble VQC) using Supervised Contrastive Loss. While it works, it lacked a rigorous quantum inductive bias beyond simple feature chunking.
+
+### Step 5: Quantum Kernel Methods & SVM
+*   **Files:** `src/benchmark_sqk.py`, `run_kernel.py`
+*   **Description:** Exploring Structured Quantum Kernels (SQK) to capture cross-modality interactions (spectral-modulated motif encoding) using SVMs, establishing the theoretical groundwork for operator geometry.
+
+### Step 6: Advanced Multi-Task Coupling & Loss Functions
+*   **Files:** `src/loss.py`
+*   **Description:** Custom `MaskedBCEWithLogitsLoss` to seamlessly handle the missing labels in Tox21 across all models.
+
+### Step 7: Deep Quantum Inductive Bias (The 3 Levels of Novelty)
+*   **Files:** `src/quantum_levels.py`, `run_experiment.py` (New implementations)
+*   **Description:** To truly demonstrate quantum advantage over classical networks of the same parameter count, we introduce three structural levels comparing Classical MLPs against Quantum Circuits:
+    *   **Level 1 (Features -> Models):** "Three Circuits + Attention". Motif, Cycle, and Spectral features are routed to independent models and aggregated. (Weak novelty).
+    *   **Level 2 (Features -> Operator Families):** "Chemical-to-Operator Correspondence". Motifs map to local $R_y$ observables; Cycles to $R_z$ phase operators; Spectral to $XY$ Hamiltonians. (Stronger novelty).
+    *   **Level 3 (Features -> Operator Geometry):** "Chemical Operator Geometry". Deep cross-modulation where, for example, motif features dynamically modulate the phase accumulation of cycle features ($R_z(c + \alpha m)$), and spectral features dictate entanglement strength ($e^{-i \theta(s) Z_i Z_j}$). (Highest novelty).
+
+---
 
 ## Installation
 
@@ -56,46 +51,36 @@ pip install torch torch-geometric pennylane rdkit scikit-learn pandas numpy tqdm
 
 ## Running Experiments
 
-Use the `run_experiment.py` script to train models and evaluate performance.
+Use the `run_experiment.py` script to train models and evaluate performance across the evolutionary levels.
 
-### 1. Train the Novel Hybrid Ensemble
+### Running the New Levels (Levels 1-3)
+
+**Level 1:**
 ```bash
-python run_experiment.py --model hybrid_ensemble --estimators 4 --qubits 4 --layers 2 --alpha 0.1 --epochs 20
+python run_experiment.py --model level1_quantum
+python run_experiment.py --model level1_classical
 ```
 
-*   `--estimators`: Number of parallel quantum circuits.
-*   `--qubits`: Number of qubits per estimator.
-*   `--alpha`: Weight of the contrastive loss (0.0 to 1.0).
-*   `--split`: Whether to split the latent vector chunks or copy the full vector to each estimator.
-
-### 2. Baselines
-
-**Random Forest on Morgan Fingerprints (Standard Cheminformatics Baseline):**
+**Level 2:**
 ```bash
+python run_experiment.py --model level2_quantum
+python run_experiment.py --model level2_classical
+```
+
+**Level 3:**
+```bash
+python run_experiment.py --model level3_quantum
+python run_experiment.py --model level3_classical
+```
+
+### Running Older Baselines
+```bash
+# Standard Classical GNN
+python run_experiment.py --model classical_gnn --gnn gine
+
+# Hybrid Ensemble (Step 4)
+python run_experiment.py --model hybrid_ensemble --estimators 4 --qubits 4 --layers 2
+
+# Random Forest
 python run_experiment.py --model rf
 ```
-
-**Classical Ensemble (to isolate Quantum Advantage):**
-Runs a classical neural network with the exact same architecture as the Hybrid model, but replaces the Quantum Layers with MLPs of equivalent parameter count.
-```bash
-python run_experiment.py --model classical_ensemble --estimators 4
-```
-
-**Standard Classical GNN:**
-```bash
-python run_experiment.py --model classical_gnn --gnn gine
-```
-
-## Repository Structure
-
-*   `src/run_experiment.py`: Main entry point.
-*   `src/hybrid_model.py`: Contains `HybridEnsembleVQC`.
-*   `src/quantum_layers.py`: Implements `QuantumEnsemble` and `QuantumLayer` (PennyLane).
-*   `src/classical_gnn.py`: PyG implementation of GINE/GAT encoders.
-*   `src/loss.py`: Custom Masked BCE and Contrastive Loss functions.
-*   `src/data_loader.py`: Tox21 data processing and scaffold splitting.
-*   `src/baselines.py`: Implementation of RF and Classical Ensemble baselines.
-
-## Future Work
-*   Deployment on real quantum hardware (e.g., IBM Quantum) via PennyLane plugins.
-*   Integration of Error Mitigation techniques (ZNE).
