@@ -11,25 +11,25 @@ class Level1Classical(nn.Module):
     Level 1 Classical: "Three MLPs + Attention"
     Features are routed to independent MLP models and aggregated.
     """
-    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
 
         # Three independent Classical MLPs replacing the quantum circuits
         self.mlp_motif = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
+            nn.Linear(hidden_dim, inner_dim),
             nn.ReLU(),
-            nn.Linear(32, out_dim)
+            nn.Linear(inner_dim, out_dim)
         )
         self.mlp_cycle = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
+            nn.Linear(hidden_dim, inner_dim),
             nn.ReLU(),
-            nn.Linear(32, out_dim)
+            nn.Linear(inner_dim, out_dim)
         )
         self.mlp_spectral = nn.Sequential(
-            nn.Linear(hidden_dim, 32),
+            nn.Linear(hidden_dim, inner_dim),
             nn.ReLU(),
-            nn.Linear(32, out_dim)
+            nn.Linear(inner_dim, out_dim)
         )
 
         # Attention aggregation
@@ -115,7 +115,7 @@ class Level2Classical(nn.Module):
     We try to simulate the specific algebraic processing of features using MLPs.
     However, the classical MLPs lack the strict geometric inductive bias of quantum operators.
     """
-    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
 
@@ -123,22 +123,22 @@ class Level2Classical(nn.Module):
         self.mlp_motif = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, 32)
+            nn.Linear(hidden_dim, inner_dim)
         )
 
         # Cycle -> Phase/Periodic processing (Simulated by Sine/Cosine activations)
-        self.mlp_cycle_proj = nn.Linear(hidden_dim, 32)
-        self.mlp_cycle_out = nn.Linear(32, 32)
+        self.mlp_cycle_proj = nn.Linear(hidden_dim, inner_dim)
+        self.mlp_cycle_out = nn.Linear(inner_dim, inner_dim)
 
         # Spectral -> Mixing/Interaction (Simulated by dense cross-attention like mixing)
         self.mlp_spectral = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 2),
             nn.ReLU(),
-            nn.Linear(hidden_dim * 2, 32)
+            nn.Linear(hidden_dim * 2, inner_dim)
         )
 
         # Aggregation
-        self.agg = nn.Linear(32 * 3, out_dim)
+        self.agg = nn.Linear(inner_dim * 3, out_dim)
 
     def forward(self, data):
         m, c, s = self.extractor(data)
@@ -237,23 +237,23 @@ class Level3Classical(nn.Module):
     Instead of passing features to independent streams, features actively modulate
     the weights/activations of the networks processing other features.
     """
-    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
 
         # Motif processing network
-        self.motif_net = nn.Linear(hidden_dim, 32)
+        self.motif_net = nn.Linear(hidden_dim, inner_dim)
 
         # Modulators
         # Motif modulates Cycle phase
-        self.motif_to_cycle_mod = nn.Linear(hidden_dim, 32)
+        self.motif_to_cycle_mod = nn.Linear(hidden_dim, inner_dim)
         # Spectral modulates Cycle interaction
-        self.spectral_to_cycle_mod = nn.Linear(hidden_dim, 32)
+        self.spectral_to_cycle_mod = nn.Linear(hidden_dim, inner_dim)
 
-        self.cycle_net_1 = nn.Linear(hidden_dim, 32)
-        self.cycle_net_2 = nn.Linear(32, 32)
+        self.cycle_net_1 = nn.Linear(hidden_dim, inner_dim)
+        self.cycle_net_2 = nn.Linear(inner_dim, inner_dim)
 
-        self.agg = nn.Linear(32 * 2, out_dim)
+        self.agg = nn.Linear(inner_dim * 2, out_dim)
 
     def forward(self, data):
         m, c, s = self.extractor(data)
