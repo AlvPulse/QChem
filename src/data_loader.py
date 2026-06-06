@@ -68,8 +68,8 @@ def mol_to_pyg(smiles, y):
     edge_attr = torch.tensor(np.vstack(eattr), dtype=torch.long)
     x = torch.tensor(x, dtype=torch.long)
 
-    # y is expected to be a list/array of 12 floats (or NaNs)
-    y = torch.tensor(y, dtype=torch.float32).view(1, -1) # Shape (1, 12)
+    # y is expected to be a list/array of floats (or NaNs)
+    y = torch.tensor(y, dtype=torch.float32).view(1, -1)
 
     return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
@@ -141,9 +141,10 @@ def get_dataloaders(batch_size=64, root_dir='.'):
             # Convert to float, replacing '' with nan if needed
             return [float(v) if v != '' else float('nan') for v in vals]
         except:
-            return [float('nan')] * 12 # Assuming 12 tasks
+            return None
 
     df['label'] = df['label'].apply(parse_label)
+    df = df.dropna(subset=['label'])
 
     # Clean
     df['smiles'] = df['smiles'].apply(canonical_smiles)
@@ -152,9 +153,10 @@ def get_dataloaders(batch_size=64, root_dir='.'):
     # Remove duplicates
     df = df.drop_duplicates(subset=['smiles'])
 
-    # Verify label dimension (should be 12)
+    # Verify label dimension
+    num_tasks = len(df.iloc[0]['label'])
     # Filter out rows with incorrect label length
-    df = df[df['label'].apply(len) == 12]
+    df = df[df['label'].apply(len) == num_tasks]
 
     # Scaffold Split
     tr_df, va_df, te_df = scaffold_split(df)
@@ -164,12 +166,12 @@ def get_dataloaders(batch_size=64, root_dir='.'):
     va_ds = Tox21GraphDataset('.', va_df)
     te_ds = Tox21GraphDataset('.', te_df)
 
-    # Calculate pos_weights for all 12 tasks
+    # Calculate pos_weights for all tasks
     # Iterate over training data to count positives and negatives per task
-    all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, 12)
+    all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, num_tasks)
 
     pos_weights = []
-    for i in range(12):
+    for i in range(num_tasks):
         y_task = all_y_tr[:, i]
         # Ignore NaNs
         valid_mask = ~np.isnan(y_task)
@@ -192,4 +194,66 @@ def get_dataloaders(batch_size=64, root_dir='.'):
     val_loader = DataLoader(va_ds, batch_size=batch_size, shuffle=False)
     test_loader = DataLoader(te_ds, batch_size=batch_size, shuffle=False)
 
-    return train_loader, val_loader, test_loader, pos_weights
+    return train_loader, val_loader, test_loader, pos_weights, num_tasks
+
+
+def get_toxcast_dataloaders(batch_size=64, root_dir='.'):
+    """
+    Downloads and prepares the ToxCast dataset using PyTorch Geometric's MoleculeNet.
+    Returns: train_loader, val_loader, test_loader, pos_weights, num_tasks
+    """
+    from torch_geometric.datasets import MoleculeNet
+
+    # We download the dataset using PyG
+    dataset = MoleculeNet(root=os.path.join(root_dir, 'data'), name='ToxCast')
+    num_tasks = dataset[0].y.shape[1]
+
+    # We want to format this into our scaffold split df format to keep things consistent.
+    # PyG MoleculeNet provides smiles in data.smiles
+    data_list = []
+    for data in dataset:
+        data_list.append({
+            'smiles': data.smiles,
+            'label': data.y.squeeze(0).tolist() # converting tensor of shape (1, num_tasks) to list
+        })
+
+    df = pd.DataFrame(data_list)
+
+    # Clean
+    df['smiles'] = df['smiles'].apply(canonical_smiles)
+    df = df.dropna(subset=['smiles'])
+    df = df.drop_duplicates(subset=['smiles'])
+
+    # Filter out rows with incorrect label length
+    df = df[df['label'].apply(len) == num_tasks]
+
+    # Scaffold Split
+    tr_df, va_df, te_df = scaffold_split(df)
+
+    # PyG Datasets
+    tr_ds = Tox21GraphDataset('.', tr_df)
+    va_ds = Tox21GraphDataset('.', va_df)
+    te_ds = Tox21GraphDataset('.', te_df)
+
+    all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, num_tasks)
+
+    pos_weights = []
+    for i in range(num_tasks):
+        y_task = all_y_tr[:, i]
+        valid_mask = ~np.isnan(y_task)
+        if valid_mask.sum() > 0:
+            y_valid = y_task[valid_mask]
+            n_pos = (y_valid == 1).sum()
+            n_neg = (y_valid == 0).sum()
+            weight = n_neg / max(n_pos, 1)
+        else:
+            weight = 1.0
+        pos_weights.append(weight)
+
+    pos_weights = torch.tensor(pos_weights, dtype=torch.float32)
+
+    train_loader = DataLoader(tr_ds, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(va_ds, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(te_ds, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader, test_loader, pos_weights, num_tasks

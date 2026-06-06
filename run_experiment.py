@@ -4,7 +4,7 @@ import numpy as np
 import random
 import os
 
-from src.data_loader import get_dataloaders
+from src.data_loader import get_dataloaders, get_toxcast_dataloaders
 from src.train import Trainer
 from src.hybrid_model import HybridEnsembleVQC
 from src.baselines import HybridClassicalEnsemble, run_rf_baseline
@@ -47,6 +47,7 @@ def main():
     parser.add_argument('--gnn', type=str, default='gine', choices=['gine', 'gat'])
     parser.add_argument('--dropout', type=float, default=0.2)
     parser.add_argument('--diagnose', action='store_true', help='Run kernel diagnostics before training')
+    parser.add_argument('--dataset', type=str, default='tox21', choices=['tox21', 'toxcast'], help='Dataset to use')
 
     args = parser.parse_args()
 
@@ -60,8 +61,13 @@ def main():
         return
 
     # Load Data
-    print("Loading Data...")
-    train_loader, val_loader, test_loader, pos_weight = get_dataloaders(batch_size=args.batch_size)
+    print(f"Loading {args.dataset.capitalize()} Data...")
+    if args.dataset == 'toxcast':
+        train_loader, val_loader, test_loader, pos_weight, num_tasks = get_toxcast_dataloaders(batch_size=args.batch_size)
+    else:
+        train_loader, val_loader, test_loader, pos_weight, num_tasks = get_dataloaders(batch_size=args.batch_size)
+
+    print(f"Number of Tasks: {num_tasks}")
 
     # Initialize Model
     if args.model == 'hybrid_ensemble':
@@ -73,7 +79,7 @@ def main():
             gnn_type=args.gnn,
             dropout=args.dropout,
             split_input=args.split,
-            n_outputs=12
+            n_outputs=num_tasks
         )
     elif args.model == 'classical_ensemble':
         model = HybridClassicalEnsemble(
@@ -82,34 +88,34 @@ def main():
             gnn_type=args.gnn,
             dropout=args.dropout,
             split_input=args.split,
-            n_outputs=12
+            n_outputs=num_tasks
         )
     elif args.model == 'classical_gnn':
         model = ClassicalGNN(
             gnn_type=args.gnn,
             dropout=args.dropout,
-            out_dim=12
+            out_dim=num_tasks
         )
     elif args.model == 'hybrid_kernel':
         print(f"Initializing Structured Quantum Kernel with {args.qubits} qubits...")
         model = HybridStructuredQGNN(
-            num_tasks=12,
+            num_tasks=num_tasks,
             hidden=64, 
             n_qubits=args.qubits
         )
     # --- NEW LEVELS ---
     elif args.model == 'level1_classical':
-        model = Level1Classical(hidden_dim=64, out_dim=12, dropout=args.dropout)
+        model = Level1Classical(hidden_dim=64, out_dim=num_tasks, dropout=args.dropout)
     elif args.model == 'level1_quantum':
-        model = Level1Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=12, dropout=args.dropout)
+        model = Level1Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=num_tasks, dropout=args.dropout)
     elif args.model == 'level2_classical':
-        model = Level2Classical(hidden_dim=64, out_dim=12, dropout=args.dropout)
+        model = Level2Classical(hidden_dim=64, out_dim=num_tasks, dropout=args.dropout)
     elif args.model == 'level2_quantum':
-        model = Level2Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=12, dropout=args.dropout)
+        model = Level2Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=num_tasks, dropout=args.dropout)
     elif args.model == 'level3_classical':
-        model = Level3Classical(hidden_dim=64, out_dim=12, dropout=args.dropout)
+        model = Level3Classical(hidden_dim=64, out_dim=num_tasks, dropout=args.dropout)
     elif args.model == 'level3_quantum':
-        model = Level3Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=12, dropout=args.dropout)
+        model = Level3Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=num_tasks, dropout=args.dropout)
     else:
         raise ValueError(f"Unknown model: {args.model}")
 
