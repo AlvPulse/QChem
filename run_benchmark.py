@@ -122,7 +122,8 @@ def main():
                 'Model_Name': f"Level {level} Quantum",
                 'Description': desc,
                 'Level': level, 'Type': 'Quantum', 'Qubits': scale,
-                'Params': q_params, 'Test_ROC': q_test_mets['roc_auc'], 'Test_PR': q_test_mets['pr_auc']
+                'Params': q_params, 'Test_ROC': q_test_mets['roc_auc'], 'Test_PR': q_test_mets['pr_auc'],
+                'Test_Brier': q_test_mets['brier'], 'Test_F1': q_test_mets['f1']
             })
 
             # --- 2. Train Classical with Matched Params ---
@@ -164,7 +165,8 @@ def main():
                 'Model_Name': f"Level {level} Classical",
                 'Description': "Parameter-Matched Classical Counterpart",
                 'Level': level, 'Type': 'Classical', 'Qubits': scale,
-                'Params': c_params, 'Test_ROC': c_test_mets['roc_auc'], 'Test_PR': c_test_mets['pr_auc']
+                'Params': c_params, 'Test_ROC': c_test_mets['roc_auc'], 'Test_PR': c_test_mets['pr_auc'],
+                'Test_Brier': c_test_mets['brier'], 'Test_F1': c_test_mets['f1']
             })
 
     # Save Results

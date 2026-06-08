@@ -1,7 +1,7 @@
 
 import torch
 import torch.nn as nn
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss, f1_score
 import numpy as np
 from tqdm import tqdm
 from .loss import MaskedBCEWithLogitsLoss, MultiTaskSupervisedContrastiveLoss
@@ -82,10 +82,12 @@ class Trainer:
     def calculate_metrics(self, y_true, y_prob):
         y_true = np.array(y_true)
         y_prob = np.array(y_prob)
-        # y_true: (N, 12), y_prob: (N, 12)
+        # y_true: (N, num_tasks), y_prob: (N, num_tasks)
 
         roc_aucs = []
         pr_aucs = []
+        brier_scores = []
+        f1_scores = []
 
         n_tasks = y_true.shape[1]
         for i in range(n_tasks):
@@ -107,15 +109,22 @@ class Trainer:
             try:
                 roc_aucs.append(roc_auc_score(y_t, p_t))
                 pr_aucs.append(average_precision_score(y_t, p_t))
+                brier_scores.append(brier_score_loss(y_t, p_t))
+
+                # F1 needs binary predictions
+                y_pred = (p_t > 0.5).astype(int)
+                f1_scores.append(f1_score(y_t, y_pred, zero_division=0))
             except ValueError:
                 pass
 
         if len(roc_aucs) == 0:
-            return {'roc_auc': 0.5, 'pr_auc': 0.0}
+            return {'roc_auc': 0.5, 'pr_auc': 0.0, 'brier': 0.0, 'f1': 0.0}
 
         return {
             'roc_auc': np.mean(roc_aucs),
-            'pr_auc': np.mean(pr_aucs)
+            'pr_auc': np.mean(pr_aucs),
+            'brier': np.mean(brier_scores),
+            'f1': np.mean(f1_scores)
         }
 
 def run_benchmark(model_type='classical', n_qubits=4, epochs=10, batch_size=32):
