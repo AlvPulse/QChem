@@ -23,10 +23,36 @@ def set_seed(seed=42):
 def get_param_count(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
-def calculate_classical_inner_dim(target_params, out_dim, in_dim=64):
-    """Dynamically sizes the Classical MLPs to match Quantum param counts roughly."""
-    inner_dim = (target_params - out_dim) / (in_dim + out_dim + 1)
-    return max(1, int(round(inner_dim)))
+def match_classical_inner_dim(target_params, level, num_tasks, in_dim=64):
+    """
+    Iteratively finds the inner_dim for a given Classical level model
+    that makes its parameter count as close as possible to target_params.
+    """
+    best_inner = 1
+    min_diff = float('inf')
+
+    # We brute-force search the inner_dim to guarantee accurate parameter matching.
+    # Typical inner_dims range from 1 to 512.
+    for inner in range(1, 513):
+        if level == 1:
+            temp_model = Level1Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
+        elif level == 2:
+            temp_model = Level2Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
+        elif level == 3:
+            temp_model = Level3Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
+
+        params = get_param_count(temp_model)
+        diff = abs(params - target_params)
+
+        if diff < min_diff:
+            min_diff = diff
+            best_inner = inner
+
+        # If we overshoot and diff starts increasing, we can stop
+        if params > target_params and diff > min_diff:
+            break
+
+    return best_inner
 
 def main():
     set_seed(42)
@@ -88,14 +114,20 @@ def main():
                 'train_roc': q_train_roc, 'val_roc': q_val_roc
             })
 
+            desc = "Independent Feature-to-Operator Routing"
+            if level == 2: desc = "Chemical-to-Operator Mapping"
+            if level == 3: desc = "Dynamic Operator Geometry"
+
             results.append({
+                'Model_Name': f"Level {level} Quantum",
+                'Description': desc,
                 'Level': level, 'Type': 'Quantum', 'Qubits': scale,
                 'Params': q_params, 'Test_ROC': q_test_mets['roc_auc'], 'Test_PR': q_test_mets['pr_auc']
             })
 
             # --- 2. Train Classical with Matched Params ---
             c_model_name = f"level{level}_classical"
-            inner_dim = calculate_classical_inner_dim(q_params, num_tasks, 64)
+            inner_dim = match_classical_inner_dim(q_params, level, num_tasks, 64)
             print(f"\n--- Initializing {c_model_name.upper()} (Matched Inner Dim: {inner_dim}) ---")
 
             if level == 1:
@@ -129,7 +161,9 @@ def main():
             })
 
             results.append({
-                'Level': level, 'Type': 'Classical', 'Qubits': scale, # Scale is a proxy for param size
+                'Model_Name': f"Level {level} Classical",
+                'Description': "Parameter-Matched Classical Counterpart",
+                'Level': level, 'Type': 'Classical', 'Qubits': scale,
                 'Params': c_params, 'Test_ROC': c_test_mets['roc_auc'], 'Test_PR': c_test_mets['pr_auc']
             })
 
