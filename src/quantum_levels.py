@@ -39,7 +39,7 @@ class Level1Classical(nn.Module):
         )
 
     def forward(self, data):
-        m, c, s = self.extractor(data) # (B, hidden_dim)
+        m, c, s, _ = self.extractor(data) # (B, hidden_dim)
 
         out_m = self.mlp_motif(m)       # (B, out_dim)
         out_c = self.mlp_cycle(c)       # (B, out_dim)
@@ -87,7 +87,7 @@ class Level1Quantum(nn.Module):
         )
 
     def forward(self, data):
-        m, c, s = self.extractor(data)
+        m, c, s, _ = self.extractor(data)
 
         # Project
         m_q = self.proj_motif(m)
@@ -141,7 +141,7 @@ class Level2Classical(nn.Module):
         self.agg = nn.Linear(inner_dim * 3, out_dim)
 
     def forward(self, data):
-        m, c, s = self.extractor(data)
+        m, c, s, _ = self.extractor(data)
 
         out_m = self.mlp_motif(m)
 
@@ -222,7 +222,7 @@ class Level2Quantum(nn.Module):
         self.head = nn.Linear(n_qubits, out_dim)
 
     def forward(self, data):
-        m, c, s = self.extractor(data)
+        m, c, s, _ = self.extractor(data)
 
         m_q = self.proj_motif(m)
         c_q = self.proj_cycle(c)
@@ -236,6 +236,7 @@ class Level3Classical(nn.Module):
     Level 3 Classical: "Feature-wise Linear Modulation (FiLM)"
     Instead of passing features to independent streams, features actively modulate
     the weights/activations of the networks processing other features.
+    Added LayerNorm and Residual connections to prevent catastrophic collapse.
     """
     def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
         super().__init__()
@@ -243,6 +244,7 @@ class Level3Classical(nn.Module):
 
         # Motif processing network
         self.motif_net = nn.Linear(hidden_dim, inner_dim)
+        self.norm_m = nn.LayerNorm(inner_dim)
 
         # Modulators
         # Motif modulates Cycle phase
@@ -251,28 +253,37 @@ class Level3Classical(nn.Module):
         self.spectral_to_cycle_mod = nn.Linear(hidden_dim, inner_dim)
 
         self.cycle_net_1 = nn.Linear(hidden_dim, inner_dim)
+        self.norm_c1 = nn.LayerNorm(inner_dim)
         self.cycle_net_2 = nn.Linear(inner_dim, inner_dim)
+        self.norm_c2 = nn.LayerNorm(inner_dim)
 
         self.agg = nn.Linear(inner_dim * 2, out_dim)
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, data):
-        m, c, s = self.extractor(data)
+        m, c, s, _ = self.extractor(data)
 
-        out_m = F.relu(self.motif_net(m))
+        # Motif processing with LayerNorm
+        out_m = F.relu(self.norm_m(self.motif_net(m)))
 
         # Motif modulates Cycle (Shift)
         shift_m = self.motif_to_cycle_mod(m)
 
         # Spectral modulates Cycle (Scale)
-        scale_s = torch.sigmoid(self.spectral_to_cycle_mod(s))
+        # Use tanh to allow both positive/negative scaling, but limit exploding gradients
+        scale_s = torch.tanh(self.spectral_to_cycle_mod(s))
 
-        # Cycle Processing modulated by M and S
-        c_1 = self.cycle_net_1(c)
+        # Cycle Processing modulated by M and S with LayerNorm and Residual connection
+        c_1 = self.norm_c1(self.cycle_net_1(c))
         c_mod = (c_1 * scale_s) + shift_m
-        out_c = F.relu(self.cycle_net_2(c_mod))
 
-        # Concatenate and project
-        concat = torch.cat([out_m, out_c], dim=1)
+        # Residual connection over modulation
+        c_mod_res = c_1 + c_mod
+
+        out_c = F.relu(self.norm_c2(self.cycle_net_2(c_mod_res)))
+
+        # Concatenate and project with Dropout
+        concat = self.dropout(torch.cat([out_m, out_c], dim=1))
         return self.agg(concat)
 
 
@@ -343,11 +354,306 @@ class Level3Quantum(nn.Module):
         self.head = nn.Linear(n_qubits, out_dim)
 
     def forward(self, data):
-        m, c, s = self.extractor(data)
+        m, c, s, _ = self.extractor(data)
 
         m_q = self.proj_motif(m)
         c_q = self.proj_cycle(c)
         s_q = self.proj_spectral(s)
 
         q_out = self.q_layer(m_q, c_q, s_q)
+        return self.head(q_out)
+
+class Level4Classical(nn.Module):
+    """
+    Level 4 Classical: "Spectral Hamiltonian Walk Equivalent"
+    Mimics continuous-time evolution by using residual networks and matrix exponentials (approximated).
+    """
+    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
+        super().__init__()
+        self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+        self.walk_net = nn.Sequential(
+            nn.Linear(hidden_dim, inner_dim),
+            nn.LayerNorm(inner_dim),
+            nn.ReLU(),
+            nn.Linear(inner_dim, inner_dim),
+            nn.LayerNorm(inner_dim),
+            nn.ReLU()
+        )
+        self.agg = nn.Linear(inner_dim, out_dim)
+
+    def forward(self, data):
+        _, _, s, chem = self.extractor(data)
+        # Combine spectral and chem to approximate the Hamiltonian walk
+        out = self.walk_net(s + chem)
+        return self.agg(out)
+
+class Level4QuantumLayer(nn.Module):
+    """
+    Level 4 Quantum Layer: "Spectral Hamiltonian Walk"
+    Utilizes continuous-time quantum walk / Hamiltonian evolution defined by the spectral graph eigenvalues.
+    """
+    def __init__(self, n_qubits=4, n_layers=2):
+        super().__init__()
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dev = qml.device("default.qubit", wires=n_qubits)
+
+        @qml.qnode(self.dev, interface="torch")
+        def circuit(s_inputs, chem_inputs, weights, time_t):
+            for l in range(n_layers):
+                for i in range(n_qubits):
+                    qml.RX(chem_inputs[i] * weights[l, i, 0], wires=i)
+                # Hamiltonian Evolution e^{-i H t}
+                # Approximate H with Spectral features as coupling strengths
+                for i in range(n_qubits - 1):
+                    qml.IsingZZ(s_inputs[i] * time_t, wires=[i, i+1])
+                qml.IsingZZ(s_inputs[-1] * time_t, wires=[n_qubits-1, 0])
+            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+
+        self.qnode = circuit
+        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 1))
+        self.time_t = nn.Parameter(torch.tensor(1.0))
+
+    def forward(self, s, chem):
+        s = torch.atan(s)
+        chem = torch.atan(chem)
+        batch_size = s.shape[0]
+        res = []
+        for b in range(batch_size):
+            out = self.qnode(s[b], chem[b], self.weights, self.time_t)
+            res.append(torch.stack(out))
+        return torch.stack(res, dim=0).float()
+
+class Level4Quantum(nn.Module):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+        super().__init__()
+        self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+        self.proj_spectral = nn.Linear(hidden_dim, n_qubits)
+        self.proj_chem = nn.Linear(hidden_dim, n_qubits)
+        self.q_layer = Level4QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
+        self.head = nn.Linear(n_qubits, out_dim)
+
+    def forward(self, data):
+        _, _, s, chem = self.extractor(data)
+        s_q = self.proj_spectral(s)
+        chem_q = self.proj_chem(chem)
+        q_out = self.q_layer(s_q, chem_q)
+        return self.head(q_out)
+
+class Level5Classical(nn.Module):
+    """
+    Level 5 Classical: "Electronic Structure / Hückel Model Equivalent"
+    """
+    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
+        super().__init__()
+        self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+        self.elec_net = nn.Sequential(
+            nn.Linear(hidden_dim, inner_dim),
+            nn.LayerNorm(inner_dim),
+            nn.Sigmoid(),
+            nn.Linear(inner_dim, inner_dim),
+            nn.LayerNorm(inner_dim),
+            nn.Tanh()
+        )
+        self.agg = nn.Linear(inner_dim, out_dim)
+
+    def forward(self, data):
+        _, _, _, chem = self.extractor(data)
+        out = self.elec_net(chem)
+        return self.agg(out)
+
+class Level5QuantumLayer(nn.Module):
+    """
+    Level 5 Quantum Layer: "Electronic Structure / Hückel Model"
+    Z-rotations reflect atomic electronic properties.
+    Entanglements reflect chemical bond orders.
+    """
+    def __init__(self, n_qubits=4, n_layers=2):
+        super().__init__()
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dev = qml.device("default.qubit", wires=n_qubits)
+
+        @qml.qnode(self.dev, interface="torch")
+        def circuit(chem_inputs, weights):
+            for l in range(n_layers):
+                for i in range(n_qubits):
+                    # Z-rotations reflect electronegativity / partial charges
+                    qml.RZ(chem_inputs[i] * weights[l, i, 0], wires=i)
+                    qml.RY(chem_inputs[i] * weights[l, i, 1], wires=i)
+                for i in range(n_qubits - 1):
+                    # XX/YY Entanglement reflecting bonding
+                    qml.IsingXX(chem_inputs[i] * weights[l, i, 2], wires=[i, i+1])
+                    qml.IsingYY(chem_inputs[i+1] * weights[l, i, 3], wires=[i, i+1])
+            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+
+        self.qnode = circuit
+        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 4))
+
+    def forward(self, chem):
+        chem = torch.atan(chem)
+        batch_size = chem.shape[0]
+        res = []
+        for b in range(batch_size):
+            out = self.qnode(chem[b], self.weights)
+            res.append(torch.stack(out))
+        return torch.stack(res, dim=0).float()
+
+class Level5Quantum(nn.Module):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+        super().__init__()
+        self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+        self.proj_chem = nn.Linear(hidden_dim, n_qubits)
+        self.q_layer = Level5QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
+        self.head = nn.Linear(n_qubits, out_dim)
+
+    def forward(self, data):
+        _, _, _, chem = self.extractor(data)
+        chem_q = self.proj_chem(chem)
+        q_out = self.q_layer(chem_q)
+        return self.head(q_out)
+
+class Level6Classical(nn.Module):
+    """
+    Level 6 Classical: "3D Spatial / Electrostatic Mapping Equivalent"
+    """
+    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
+        super().__init__()
+        self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+        self.spatial_net = nn.Sequential(
+            nn.Linear(hidden_dim, inner_dim),
+            nn.LayerNorm(inner_dim),
+            nn.PReLU(),
+            nn.Linear(inner_dim, inner_dim),
+            nn.LayerNorm(inner_dim),
+            nn.PReLU()
+        )
+        self.agg = nn.Linear(inner_dim, out_dim)
+
+    def forward(self, data):
+        _, _, _, chem = self.extractor(data)
+        out = self.spatial_net(chem)
+        return self.agg(out)
+
+class Level6QuantumLayer(nn.Module):
+    """
+    Level 6 Quantum Layer: "3D Spatial / Electrostatic Mapping"
+    Interactions mimic spatial folding and physical distances.
+    """
+    def __init__(self, n_qubits=4, n_layers=2):
+        super().__init__()
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dev = qml.device("default.qubit", wires=n_qubits)
+
+        @qml.qnode(self.dev, interface="torch")
+        def circuit(chem_inputs, weights):
+            for l in range(n_layers):
+                for i in range(n_qubits):
+                    qml.RX(chem_inputs[i] * weights[l, i, 0], wires=i)
+                    qml.RY(chem_inputs[i] * weights[l, i, 1], wires=i)
+                    qml.RZ(chem_inputs[i] * weights[l, i, 2], wires=i)
+                # All-to-all entanglement weighted by 3D spatial chem feature
+                for i in range(n_qubits):
+                    for j in range(i + 1, n_qubits):
+                        coupling = chem_inputs[i] * chem_inputs[j] * weights[l, i, 3]
+                        qml.CRZ(coupling, wires=[i, j])
+            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+
+        self.qnode = circuit
+        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 4))
+
+    def forward(self, chem):
+        chem = torch.atan(chem)
+        batch_size = chem.shape[0]
+        res = []
+        for b in range(batch_size):
+            out = self.qnode(chem[b], self.weights)
+            res.append(torch.stack(out))
+        return torch.stack(res, dim=0).float()
+
+class Level6Quantum(nn.Module):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+        super().__init__()
+        self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+        self.proj_chem = nn.Linear(hidden_dim, n_qubits)
+        self.q_layer = Level6QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
+        self.head = nn.Linear(n_qubits, out_dim)
+
+    def forward(self, data):
+        _, _, _, chem = self.extractor(data)
+        chem_q = self.proj_chem(chem)
+        q_out = self.q_layer(chem_q)
+        return self.head(q_out)
+
+class Level7Classical(nn.Module):
+    """
+    Level 7 Classical: "Pharmacophore / Reactivity Mapping Equivalent"
+    """
+    def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
+        super().__init__()
+        self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+        self.pharm_net = nn.Sequential(
+            nn.Linear(hidden_dim, inner_dim),
+            nn.LayerNorm(inner_dim),
+            nn.LeakyReLU(),
+            nn.Linear(inner_dim, inner_dim),
+            nn.LayerNorm(inner_dim),
+            nn.LeakyReLU()
+        )
+        self.agg = nn.Linear(inner_dim, out_dim)
+
+    def forward(self, data):
+        _, _, _, chem = self.extractor(data)
+        out = self.pharm_net(chem)
+        return self.agg(out)
+
+class Level7QuantumLayer(nn.Module):
+    """
+    Level 7 Quantum Layer: "Pharmacophore / Reactivity Mapping"
+    Quantum states represent specific chemical reactivity sites.
+    """
+    def __init__(self, n_qubits=4, n_layers=2):
+        super().__init__()
+        self.n_qubits = n_qubits
+        self.n_layers = n_layers
+        self.dev = qml.device("default.qubit", wires=n_qubits)
+
+        @qml.qnode(self.dev, interface="torch")
+        def circuit(chem_inputs, weights):
+            for l in range(n_layers):
+                for i in range(n_qubits):
+                    qml.U3(chem_inputs[i] * weights[l, i, 0],
+                           chem_inputs[i] * weights[l, i, 1],
+                           chem_inputs[i] * weights[l, i, 2], wires=i)
+                for i in range(n_qubits - 1):
+                    # Multi-controlled interactions representing complex pharmacophore dependencies
+                    qml.CRX(chem_inputs[i] * weights[l, i, 3], wires=[i, i+1])
+                    qml.CRY(chem_inputs[i+1] * weights[l, i, 4], wires=[i, i+1])
+            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+
+        self.qnode = circuit
+        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 5))
+
+    def forward(self, chem):
+        chem = torch.atan(chem)
+        batch_size = chem.shape[0]
+        res = []
+        for b in range(batch_size):
+            out = self.qnode(chem[b], self.weights)
+            res.append(torch.stack(out))
+        return torch.stack(res, dim=0).float()
+
+class Level7Quantum(nn.Module):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+        super().__init__()
+        self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+        self.proj_chem = nn.Linear(hidden_dim, n_qubits)
+        self.q_layer = Level7QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
+        self.head = nn.Linear(n_qubits, out_dim)
+
+    def forward(self, data):
+        _, _, _, chem = self.extractor(data)
+        chem_q = self.proj_chem(chem)
+        q_out = self.q_layer(chem_q)
         return self.head(q_out)

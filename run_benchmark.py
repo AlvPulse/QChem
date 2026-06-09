@@ -12,7 +12,11 @@ from src.train import Trainer
 from src.quantum_levels import (
     Level1Classical, Level1Quantum,
     Level2Classical, Level2Quantum,
-    Level3Classical, Level3Quantum
+    Level3Classical, Level3Quantum,
+    Level4Classical, Level4Quantum,
+    Level5Classical, Level5Quantum,
+    Level6Classical, Level6Quantum,
+    Level7Classical, Level7Quantum
 )
 
 def set_seed(seed=42):
@@ -40,6 +44,14 @@ def match_classical_inner_dim(target_params, level, num_tasks, in_dim=64):
             temp_model = Level2Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
         elif level == 3:
             temp_model = Level3Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
+        elif level == 4:
+            temp_model = Level4Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
+        elif level == 5:
+            temp_model = Level5Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
+        elif level == 6:
+            temp_model = Level6Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
+        elif level == 7:
+            temp_model = Level7Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
 
         params = get_param_count(temp_model)
         diff = abs(params - target_params)
@@ -79,7 +91,7 @@ def main():
 
     # Iterate over levels and scales
     for scale in qubit_scales:
-        for level in [1, 2, 3]:
+        for level in [1, 2, 3, 4, 5, 6, 7]:
             # --- 1. Train Quantum to get target params ---
             q_model_name = f"level{level}_quantum"
             print(f"\n--- Initializing {q_model_name.upper()} (Qubits: {scale}) ---")
@@ -90,6 +102,14 @@ def main():
                 q_model = Level2Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks)
             elif level == 3:
                 q_model = Level3Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks)
+            elif level == 4:
+                q_model = Level4Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks)
+            elif level == 5:
+                q_model = Level5Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks)
+            elif level == 6:
+                q_model = Level6Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks)
+            elif level == 7:
+                q_model = Level7Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks)
 
             q_params = get_param_count(q_model)
             q_model.to(device)
@@ -117,6 +137,10 @@ def main():
             desc = "Independent Feature-to-Operator Routing"
             if level == 2: desc = "Chemical-to-Operator Mapping"
             if level == 3: desc = "Dynamic Operator Geometry"
+            if level == 4: desc = "Spectral Hamiltonian Walk"
+            if level == 5: desc = "Electronic Structure / Huckel Model"
+            if level == 6: desc = "3D Spatial / Electrostatic Mapping"
+            if level == 7: desc = "Pharmacophore / Reactivity Mapping"
 
             results.append({
                 'Model_Name': f"Level {level} Quantum",
@@ -137,6 +161,14 @@ def main():
                 c_model = Level2Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner_dim)
             elif level == 3:
                 c_model = Level3Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner_dim)
+            elif level == 4:
+                c_model = Level4Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner_dim)
+            elif level == 5:
+                c_model = Level5Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner_dim)
+            elif level == 6:
+                c_model = Level6Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner_dim)
+            elif level == 7:
+                c_model = Level7Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner_dim)
 
             c_params = get_param_count(c_model)
             c_model.to(device)
@@ -197,10 +229,10 @@ def main():
     plt.close()
 
     # 3. Learning Curves Grid
-    fig, axes = plt.subplots(3, 2, figsize=(15, 15))
+    fig, axes = plt.subplots(7, 2, figsize=(15, 35))
     fig.suptitle('Learning Curves (Train vs Val ROC) at Max Qubits', fontsize=16)
 
-    for i, level in enumerate([1, 2, 3]):
+    for i, level in enumerate([1, 2, 3, 4, 5, 6, 7]):
         # Quantum
         q_curve = next(c for c in learning_curves if c['model'] == f"level{level}_quantum" and c['scale'] == max_qubits)
         axes[i, 0].plot(q_curve['train_roc'], label='Train ROC')

@@ -24,14 +24,63 @@ def canonical_smiles(s):
     except:
         return None
 
-def atom_features(atom):
-    return np.array([
+from rdkit.Chem import ChemicalFeatures
+from rdkit import RDConfig
+import os
+
+# Initialize Pharmacophore feature factory
+fdefName = os.path.join(RDConfig.RDDataDir, 'BaseFeatures.fdef')
+try:
+    factory = ChemicalFeatures.BuildFeatureFactory(fdefName)
+except:
+    factory = None
+
+def atom_features(atom, mol, conf=None, p_features=None):
+    # Base features
+    base_feat = np.array([
         atom.GetAtomicNum(),
         atom.GetTotalDegree(),
         atom.GetFormalCharge(),
         int(atom.GetTotalNumHs()),
         int(atom.GetIsAromatic())
     ], dtype=np.int64)
+
+    # Advanced features (Continuous):
+    # - Partial Charge (Gasteiger)
+    # - Electronegativity (approximate using Pauling scale mapping)
+    # - 3D coordinates (x, y, z)
+    # - Pharmacophore tags (Donor, Acceptor, Hydrophobe)
+
+    try:
+        partial_charge = float(atom.GetProp('_GasteigerCharge'))
+        if np.isnan(partial_charge) or np.isinf(partial_charge):
+            partial_charge = 0.0
+    except:
+        partial_charge = 0.0
+
+    # Pauling electronegativity approximation (subset)
+    en_map = {1: 2.20, 6: 2.55, 7: 3.04, 8: 3.44, 9: 3.98, 15: 2.19, 16: 2.58, 17: 3.16, 35: 2.96, 53: 2.66}
+    en = en_map.get(atom.GetAtomicNum(), 2.5) # Default to Carbon
+
+    # 3D Coordinates
+    coords = [0.0, 0.0, 0.0]
+    if conf is not None:
+        pos = conf.GetAtomPosition(atom.GetIdx())
+        coords = [pos.x, pos.y, pos.z]
+
+    # Pharmacophores
+    is_donor = 0.0
+    is_acceptor = 0.0
+    is_hydrophobe = 0.0
+    if p_features is not None:
+        idx = atom.GetIdx()
+        if idx in p_features['Donor']: is_donor = 1.0
+        if idx in p_features['Acceptor']: is_acceptor = 1.0
+        if idx in p_features['Hydrophobe']: is_hydrophobe = 1.0
+
+    continuous_feat = np.array([partial_charge, en] + coords + [is_donor, is_acceptor, is_hydrophobe], dtype=np.float32)
+
+    return base_feat, continuous_feat
 
 def bond_features(bond):
     if bond is None:
@@ -50,8 +99,51 @@ def mol_to_pyg(smiles, y):
     except:
         return None
 
+    # Add Hs for 3D embedding and charges
+    m = Chem.AddHs(m)
+
+    # Calculate Gasteiger Charges
+    try:
+        AllChem.ComputeGasteigerCharges(m)
+    except:
+        pass
+
+    # Generate 3D Conformer
+    try:
+        res = AllChem.EmbedMolecule(m, randomSeed=SEED, maxAttempts=50)
+        if res == -1: # Failed to embed
+            conf = None
+        else:
+            # Optimize geometry
+            AllChem.UFFOptimizeMolecule(m, maxIters=200)
+            conf = m.GetConformer()
+    except:
+        conf = None
+
+    # Extract Pharmacophores
+    p_features = {'Donor': set(), 'Acceptor': set(), 'Hydrophobe': set()}
+    if factory is not None:
+        try:
+            feats = factory.GetFeaturesForMol(m)
+            for f in feats:
+                fam = f.GetFamily()
+                for atom_idx in f.GetAtomIds():
+                    if fam == 'Donor': p_features['Donor'].add(atom_idx)
+                    elif fam == 'Acceptor': p_features['Acceptor'].add(atom_idx)
+                    elif fam == 'Hydrophobe': p_features['Hydrophobe'].add(atom_idx)
+        except:
+            pass
+
     # Nodes
-    x = np.vstack([atom_features(a) for a in m.GetAtoms()]).astype(np.int64)
+    x_base = []
+    x_cont = []
+    for a in m.GetAtoms():
+        b_f, c_f = atom_features(a, m, conf, p_features)
+        x_base.append(b_f)
+        x_cont.append(c_f)
+
+    x_base = np.vstack(x_base).astype(np.int64)
+    x_cont = np.vstack(x_cont).astype(np.float32)
 
     # Edges
     ei_src, ei_dst, eattr = [], [], []
@@ -66,12 +158,13 @@ def mol_to_pyg(smiles, y):
 
     edge_index = torch.tensor([ei_src, ei_dst], dtype=torch.long)
     edge_attr = torch.tensor(np.vstack(eattr), dtype=torch.long)
-    x = torch.tensor(x, dtype=torch.long)
+    x = torch.tensor(x_base, dtype=torch.long)
+    x_cont = torch.tensor(x_cont, dtype=torch.float32)
 
     # y is expected to be a list/array of floats (or NaNs)
     y = torch.tensor(y, dtype=torch.float32).view(1, -1)
 
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+    return Data(x=x, x_cont=x_cont, edge_index=edge_index, edge_attr=edge_attr, y=y)
 
 def scaffold_split(df, seed=SEED):
     # Create scaffold buckets

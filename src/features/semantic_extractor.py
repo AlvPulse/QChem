@@ -54,6 +54,15 @@ class SemanticFeatureExtractor(nn.Module):
         )
         self.spectral_pool = AttentionalAggregation(nn.Sequential(nn.Linear(hidden_dim, 1)))
 
+        # Advanced Chemical Feature extractors for Levels 4-7
+        # x_cont format: [partial_charge, en, x, y, z, is_donor, is_acceptor, is_hydrophobe]
+        self.chem_mlp = nn.Sequential(
+            nn.Linear(hidden_dim + 8, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
+        self.chem_pool = AttentionalAggregation(nn.Sequential(nn.Linear(hidden_dim, 1)))
+
     def forward(self, data):
         # Extract and embed node features
         x_cat = []
@@ -88,4 +97,12 @@ class SemanticFeatureExtractor(nn.Module):
         spectral_nodes = self.spectral_mlp(torch.cat([h, degree_feat], dim=-1))
         spectral_rep = self.spectral_pool(spectral_nodes, batch) # (B, hidden_dim)
 
-        return motif_rep, cycle_rep, spectral_rep
+        # 4. Native Chemical Representation (used by Levels 4-7)
+        if hasattr(data, 'x_cont'):
+            chem_nodes = self.chem_mlp(torch.cat([h, data.x_cont], dim=-1))
+            chem_rep = self.chem_pool(chem_nodes, batch) # (B, hidden_dim)
+        else:
+            chem_rep = torch.zeros_like(spectral_rep)
+
+        # We return chem_rep as well for the new levels to use.
+        return motif_rep, cycle_rep, spectral_rep, chem_rep
