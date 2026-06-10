@@ -7,20 +7,21 @@ from tqdm import tqdm
 from .loss import MaskedBCEWithLogitsLoss, MultiTaskSupervisedContrastiveLoss
 
 class Trainer:
-    def __init__(self, model, device='cpu', pos_weight=None, alpha=0.1):
+    def __init__(self, model, device='cpu', pos_weight=None, alpha=0.1, lambda_desc=0.1):
         self.model = model.to(device)
         self.device = device
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
         self.alpha = alpha
+        self.lambda_desc = lambda_desc
 
-        # Loss with imbalance handling
+        # Loss with imbalance handling (Focal Loss under the hood)
         if pos_weight is not None:
-            # pos_weight is a tensor of shape (12,)
             self.criterion_bce = MaskedBCEWithLogitsLoss(pos_weight=pos_weight)
         else:
             self.criterion_bce = MaskedBCEWithLogitsLoss()
 
         self.criterion_sup = MultiTaskSupervisedContrastiveLoss(temperature=0.07)
+        self.criterion_desc = nn.MSELoss()
 
     def train_epoch(self, loader):
         self.model.train()
@@ -33,12 +34,18 @@ class Trainer:
 
             out = self.model(batch)
 
-            # Check if model returns (logits, latent) or just logits
+            # Check model outputs
+            loss_desc = 0.0
             if isinstance(out, tuple):
-                logits, latent = out
+                if len(out) == 3:
+                    logits, latent, desc_preds = out
+                    if hasattr(batch, 'y_desc'):
+                        loss_desc = self.criterion_desc(desc_preds, batch.y_desc)
+                else:
+                    logits, latent = out
                 loss_bce = self.criterion_bce(logits, batch.y)
                 loss_sup = self.criterion_sup(latent, batch.y)
-                loss = loss_bce + self.alpha * loss_sup
+                loss = loss_bce + self.alpha * loss_sup + self.lambda_desc * loss_desc
             else:
                 logits = out
                 loss = self.criterion_bce(logits, batch.y)
@@ -64,12 +71,18 @@ class Trainer:
             batch = batch.to(self.device)
             out = self.model(batch)
 
+            loss_desc = 0.0
             if isinstance(out, tuple):
-                logits, _ = out
+                if len(out) == 3:
+                    logits, _, desc_preds = out
+                    if hasattr(batch, 'y_desc'):
+                        loss_desc = self.criterion_desc(desc_preds, batch.y_desc)
+                else:
+                    logits, _ = out
             else:
                 logits = out
 
-            loss = self.criterion_bce(logits, batch.y)
+            loss = self.criterion_bce(logits, batch.y) + self.lambda_desc * loss_desc
 
             total_loss += loss.item()
             all_y.extend(batch.y.cpu().numpy())

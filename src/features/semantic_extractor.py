@@ -14,6 +14,15 @@ class SemanticFeatureExtractor(nn.Module):
     def __init__(self, hidden_dim, node_vocab_sizes=(120,10,7,5,2), emb_dims=(64,16,8,8,4), dropout=0.2):
         super().__init__()
 
+        # Auxiliary descriptor prediction head
+        # Because all quantum levels use this extractor as the base classical encoder,
+        # we put the descriptor head here to ensure the gradient flows back to update the embeddings.
+        self.desc_head = nn.Sequential(
+            nn.Linear(hidden_dim * 4, 64),
+            nn.ReLU(),
+            nn.Linear(64, 6) # 6 continuous target descriptors
+        )
+
         # Node embeddings
         self.node_embs = nn.ModuleList([
             nn.Embedding(v, d) for v, d in zip(node_vocab_sizes, emb_dims)
@@ -104,5 +113,9 @@ class SemanticFeatureExtractor(nn.Module):
         else:
             chem_rep = torch.zeros_like(spectral_rep)
 
+        # Aggregate all representations to predict descriptors
+        combined_rep = torch.cat([motif_rep, cycle_rep, spectral_rep, chem_rep], dim=-1)
+        desc_preds = self.desc_head(combined_rep)
+
         # We return chem_rep as well for the new levels to use.
-        return motif_rep, cycle_rep, spectral_rep, chem_rep
+        return motif_rep, cycle_rep, spectral_rep, chem_rep, desc_preds

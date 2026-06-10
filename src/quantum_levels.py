@@ -39,7 +39,7 @@ class Level1Classical(nn.Module):
         )
 
     def forward(self, data):
-        m, c, s, _ = self.extractor(data) # (B, hidden_dim)
+        m, c, s, _, desc_preds = self.extractor(data) # (B, hidden_dim)
 
         out_m = self.mlp_motif(m)       # (B, out_dim)
         out_c = self.mlp_cycle(c)       # (B, out_dim)
@@ -87,7 +87,7 @@ class Level1Quantum(nn.Module):
         )
 
     def forward(self, data):
-        m, c, s, _ = self.extractor(data)
+        m, c, s, _, desc_preds = self.extractor(data)
 
         # Project
         m_q = self.proj_motif(m)
@@ -141,7 +141,7 @@ class Level2Classical(nn.Module):
         self.agg = nn.Linear(inner_dim * 3, out_dim)
 
     def forward(self, data):
-        m, c, s, _ = self.extractor(data)
+        m, c, s, _, desc_preds = self.extractor(data)
 
         out_m = self.mlp_motif(m)
 
@@ -153,7 +153,8 @@ class Level2Classical(nn.Module):
 
         # Concatenate and project
         concat = torch.cat([out_m, out_c, out_s], dim=1)
-        return self.agg(concat)
+        logits = self.agg(concat)
+        return logits, concat, desc_preds
 
 
 class Level2QuantumLayer(nn.Module):
@@ -222,14 +223,15 @@ class Level2Quantum(nn.Module):
         self.head = nn.Linear(n_qubits, out_dim)
 
     def forward(self, data):
-        m, c, s, _ = self.extractor(data)
+        m, c, s, _, desc_preds = self.extractor(data)
 
         m_q = self.proj_motif(m)
         c_q = self.proj_cycle(c)
         s_q = self.proj_spectral(s)
 
         q_out = self.q_layer(m_q, c_q, s_q)
-        return self.head(q_out)
+        logits = self.head(q_out)
+        return logits, q_out, desc_preds
 
 class Level3Classical(nn.Module):
     """
@@ -261,7 +263,7 @@ class Level3Classical(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, data):
-        m, c, s, _ = self.extractor(data)
+        m, c, s, _, desc_preds = self.extractor(data)
 
         # Motif processing with LayerNorm
         out_m = F.relu(self.norm_m(self.motif_net(m)))
@@ -284,7 +286,8 @@ class Level3Classical(nn.Module):
 
         # Concatenate and project with Dropout
         concat = self.dropout(torch.cat([out_m, out_c], dim=1))
-        return self.agg(concat)
+        logits = self.agg(concat)
+        return logits, concat, desc_preds
 
 
 class Level3QuantumLayer(nn.Module):
@@ -354,25 +357,33 @@ class Level3Quantum(nn.Module):
         self.head = nn.Linear(n_qubits, out_dim)
 
     def forward(self, data):
-        m, c, s, _ = self.extractor(data)
+        m, c, s, _, desc_preds = self.extractor(data)
 
         m_q = self.proj_motif(m)
         c_q = self.proj_cycle(c)
         s_q = self.proj_spectral(s)
 
         q_out = self.q_layer(m_q, c_q, s_q)
-        return self.head(q_out)
+        logits = self.head(q_out)
+        return logits, q_out, desc_preds
+
+from torch_geometric.nn import AttentionalAggregation
 
 class Level4Classical(nn.Module):
     """
-    Level 4 Classical: "Spectral Hamiltonian Walk Equivalent"
-    Mimics continuous-time evolution by using residual networks and matrix exponentials (approximated).
+    Level 4 Classical: "3D Spatial Entanglement Equivalent"
+    Mimics quantum distance-based interactions using dot-product cross-modality.
     """
     def __init__(self, hidden_dim=64, out_dim=12, dropout=0.2, inner_dim=32):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
+
+        # Linear projection for continuous Euclidean distances
+        self.dist_proj = nn.Linear(1, inner_dim)
+        self.spatial_pool = AttentionalAggregation(nn.Sequential(nn.Linear(inner_dim, 1)))
+
         self.walk_net = nn.Sequential(
-            nn.Linear(hidden_dim, inner_dim),
+            nn.Linear(hidden_dim + inner_dim, inner_dim),
             nn.LayerNorm(inner_dim),
             nn.ReLU(),
             nn.Linear(inner_dim, inner_dim),
@@ -382,15 +393,28 @@ class Level4Classical(nn.Module):
         self.agg = nn.Linear(inner_dim, out_dim)
 
     def forward(self, data):
-        _, _, s, chem = self.extractor(data)
-        # Combine spectral and chem to approximate the Hamiltonian walk
-        out = self.walk_net(s + chem)
-        return self.agg(out)
+        _, _, s, chem, desc_preds = self.extractor(data)
+
+        # Aggregate the continuous 3D edges for classical network
+        if hasattr(data, 'edge_attr_cont'):
+            edge_embs = self.dist_proj(data.edge_attr_cont)
+            # Pool edge embeddings into a graph-level feature
+            # We use data.batch for edges by mapping edge->src_node->batch
+            edge_batch = data.batch[data.edge_index[0]] if hasattr(data, 'batch') else torch.zeros(edge_embs.size(0), dtype=torch.long, device=edge_embs.device)
+            dist_rep = self.spatial_pool(edge_embs, edge_batch)
+        else:
+            dist_rep = torch.zeros(chem.size(0), self.dist_proj.out_features, device=chem.device)
+
+        # Combine chemistry and distance representations
+        out = self.walk_net(torch.cat([chem, dist_rep], dim=-1))
+        logits = self.agg(out)
+        return logits, out, desc_preds
 
 class Level4QuantumLayer(nn.Module):
     """
-    Level 4 Quantum Layer: "Spectral Hamiltonian Walk"
-    Utilizes continuous-time quantum walk / Hamiltonian evolution defined by the spectral graph eigenvalues.
+    Level 4 Quantum Layer: "Quantum 3D Spatial Entanglement"
+    Utilizes explicitly provided 3D Euclidean distances to modulate entanglement gates (CRZ),
+    achieving a natively Quantum Geometric Message Passing layer.
     """
     def __init__(self, n_qubits=4, n_layers=2):
         super().__init__()
@@ -399,28 +423,36 @@ class Level4QuantumLayer(nn.Module):
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
-        def circuit(s_inputs, chem_inputs, weights, time_t):
+        def circuit(chem_inputs, dist_inputs, weights):
             for l in range(n_layers):
+                # 1. State Preparation (Chemical features)
                 for i in range(n_qubits):
-                    qml.RX(chem_inputs[i] * weights[l, i, 0], wires=i)
-                # Hamiltonian Evolution e^{-i H t}
-                # Approximate H with Spectral features as coupling strengths
+                    qml.RY(chem_inputs[i] * weights[l, i, 0], wires=i)
+
+                # 2. 3D Spatial Entanglement (Native Quantum Edge Processing)
+                # We map the pooled Euclidean distance directly into the phase of the entangling gate.
+                # In a true sparse QGNN, we'd map specific distances to specific qubit pairs.
+                # Here, we use the graph-level distance representation to scale the ring topology.
                 for i in range(n_qubits - 1):
-                    qml.IsingZZ(s_inputs[i] * time_t, wires=[i, i+1])
-                qml.IsingZZ(s_inputs[-1] * time_t, wires=[n_qubits-1, 0])
+                    # Inversely scale entanglement by distance (closer = stronger)
+                    coupling = weights[l, i, 1] / (1.0 + dist_inputs[i])
+                    qml.CRZ(coupling, wires=[i, i+1])
+                qml.CRZ(weights[l, -1, 1] / (1.0 + dist_inputs[-1]), wires=[n_qubits-1, 0])
+
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
         self.qnode = circuit
-        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 1))
-        self.time_t = nn.Parameter(torch.tensor(1.0))
+        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 2))
 
-    def forward(self, s, chem):
-        s = torch.atan(s)
+    def forward(self, chem, dist):
         chem = torch.atan(chem)
-        batch_size = s.shape[0]
+        # Distances are strictly positive, scale using log
+        dist = torch.log1p(torch.abs(dist))
+
+        batch_size = chem.shape[0]
         res = []
         for b in range(batch_size):
-            out = self.qnode(s[b], chem[b], self.weights, self.time_t)
+            out = self.qnode(chem[b], dist[b], self.weights)
             res.append(torch.stack(out))
         return torch.stack(res, dim=0).float()
 
@@ -428,17 +460,30 @@ class Level4Quantum(nn.Module):
     def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
-        self.proj_spectral = nn.Linear(hidden_dim, n_qubits)
+
         self.proj_chem = nn.Linear(hidden_dim, n_qubits)
+
+        # Spatial pooling mapping explicitly to qubits
+        self.dist_proj = nn.Linear(1, n_qubits)
+        self.spatial_pool = AttentionalAggregation(nn.Sequential(nn.Linear(n_qubits, 1)))
+
         self.q_layer = Level4QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
         self.head = nn.Linear(n_qubits, out_dim)
 
     def forward(self, data):
-        _, _, s, chem = self.extractor(data)
-        s_q = self.proj_spectral(s)
+        _, _, _, chem, desc_preds = self.extractor(data)
+
+        if hasattr(data, 'edge_attr_cont'):
+            edge_embs = self.dist_proj(data.edge_attr_cont)
+            edge_batch = data.batch[data.edge_index[0]] if hasattr(data, 'batch') else torch.zeros(edge_embs.size(0), dtype=torch.long, device=edge_embs.device)
+            dist_rep = self.spatial_pool(edge_embs, edge_batch)
+        else:
+            dist_rep = torch.zeros(chem.size(0), self.dist_proj.out_features, device=chem.device)
+
         chem_q = self.proj_chem(chem)
-        q_out = self.q_layer(s_q, chem_q)
-        return self.head(q_out)
+        q_out = self.q_layer(chem_q, dist_rep)
+        logits = self.head(q_out)
+        return logits, q_out, desc_preds
 
 class Level5Classical(nn.Module):
     """
@@ -458,9 +503,10 @@ class Level5Classical(nn.Module):
         self.agg = nn.Linear(inner_dim, out_dim)
 
     def forward(self, data):
-        _, _, _, chem = self.extractor(data)
+        _, _, _, chem, desc_preds = self.extractor(data)
         out = self.elec_net(chem)
-        return self.agg(out)
+        logits = self.agg(out)
+        return logits, out, desc_preds
 
 class Level5QuantumLayer(nn.Module):
     """
@@ -508,10 +554,11 @@ class Level5Quantum(nn.Module):
         self.head = nn.Linear(n_qubits, out_dim)
 
     def forward(self, data):
-        _, _, _, chem = self.extractor(data)
+        _, _, _, chem, desc_preds = self.extractor(data)
         chem_q = self.proj_chem(chem)
         q_out = self.q_layer(chem_q)
-        return self.head(q_out)
+        logits = self.head(q_out)
+        return logits, q_out, desc_preds
 
 class Level6Classical(nn.Module):
     """
@@ -531,9 +578,10 @@ class Level6Classical(nn.Module):
         self.agg = nn.Linear(inner_dim, out_dim)
 
     def forward(self, data):
-        _, _, _, chem = self.extractor(data)
+        _, _, _, chem, desc_preds = self.extractor(data)
         out = self.spatial_net(chem)
-        return self.agg(out)
+        logits = self.agg(out)
+        return logits, out, desc_preds
 
 class Level6QuantumLayer(nn.Module):
     """
@@ -581,10 +629,11 @@ class Level6Quantum(nn.Module):
         self.head = nn.Linear(n_qubits, out_dim)
 
     def forward(self, data):
-        _, _, _, chem = self.extractor(data)
+        _, _, _, chem, desc_preds = self.extractor(data)
         chem_q = self.proj_chem(chem)
         q_out = self.q_layer(chem_q)
-        return self.head(q_out)
+        logits = self.head(q_out)
+        return logits, q_out, desc_preds
 
 class Level7Classical(nn.Module):
     """
@@ -604,9 +653,10 @@ class Level7Classical(nn.Module):
         self.agg = nn.Linear(inner_dim, out_dim)
 
     def forward(self, data):
-        _, _, _, chem = self.extractor(data)
+        _, _, _, chem, desc_preds = self.extractor(data)
         out = self.pharm_net(chem)
-        return self.agg(out)
+        logits = self.agg(out)
+        return logits, out, desc_preds
 
 class Level7QuantumLayer(nn.Module):
     """
@@ -653,7 +703,8 @@ class Level7Quantum(nn.Module):
         self.head = nn.Linear(n_qubits, out_dim)
 
     def forward(self, data):
-        _, _, _, chem = self.extractor(data)
+        _, _, _, chem, desc_preds = self.extractor(data)
         chem_q = self.proj_chem(chem)
         q_out = self.q_layer(chem_q)
-        return self.head(q_out)
+        logits = self.head(q_out)
+        return logits, q_out, desc_preds

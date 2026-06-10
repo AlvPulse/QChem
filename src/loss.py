@@ -3,40 +3,59 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class MaskedBCEWithLogitsLoss(nn.Module):
-    def __init__(self, pos_weight=None):
+class MaskedMultiTaskFocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=2.0):
         super().__init__()
-        self.pos_weight = pos_weight
+        # alpha here refers to the positive class weight (pos_weight) passed down
+        self.alpha_weight = alpha
+        self.gamma = gamma
 
     def forward(self, logits, target):
-        # target shape: (B, 12), logits shape: (B, 12)
+        # target shape: (B, num_tasks), logits shape: (B, num_tasks)
         # target may contain NaNs
-
         mask = ~torch.isnan(target)
-        # Replace NaNs with 0 temporarily for BCE calculation (masked out later)
         target_clean = torch.where(mask, target, torch.zeros_like(target))
 
-        # Adjust pos_weight to device if needed
-        if self.pos_weight is not None:
-            if self.pos_weight.device != logits.device:
-                self.pos_weight = self.pos_weight.to(logits.device)
-            # pos_weight shape (12,) broadcasts to (B, 12)
-            criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=self.pos_weight)
+        # Compute standard BCE loss per element without reduction
+        if self.alpha_weight is not None:
+            if self.alpha_weight.device != logits.device:
+                self.alpha_weight = self.alpha_weight.to(logits.device)
+            # Apply pos_weight via BCEWithLogitsLoss
+            bce_loss = F.binary_cross_entropy_with_logits(
+                logits, target_clean, reduction='none', pos_weight=self.alpha_weight
+            )
         else:
-            criterion = nn.BCEWithLogitsLoss(reduction='none')
+            bce_loss = F.binary_cross_entropy_with_logits(
+                logits, target_clean, reduction='none'
+            )
 
-        loss = criterion(logits, target_clean)
+        # Compute probabilities for the focal modulating factor: p_t
+        probs = torch.sigmoid(logits)
+        # p_t = p if y=1 else (1-p)
+        p_t = target_clean * probs + (1 - target_clean) * (1 - probs)
 
-        # Apply mask
-        loss = loss * mask.float()
+        # Focal Loss: FL(p_t) = -alpha_t * (1 - p_t)**gamma * log(p_t)
+        # We already have the -log(p_t) part (which is the BCE loss, optionally weighted by pos_weight)
+        # So we just multiply by the modulating factor (1 - p_t)**gamma
+        modulating_factor = torch.pow(1.0 - p_t, self.gamma)
+
+        focal_loss = modulating_factor * bce_loss
+
+        # Apply missing-label mask
+        focal_loss = focal_loss * mask.float()
 
         # Average over valid elements
-        # Avoid division by zero
         num_valid = mask.sum()
         if num_valid > 0:
-            return loss.sum() / num_valid
+            return focal_loss.sum() / num_valid
         else:
             return torch.tensor(0.0, device=logits.device, requires_grad=True)
+
+# Keep the original wrapper name for compatibility with other files if necessary,
+# but now it uses Focal Loss logic internally.
+class MaskedBCEWithLogitsLoss(MaskedMultiTaskFocalLoss):
+    def __init__(self, pos_weight=None, gamma=2.0):
+        super().__init__(alpha=pos_weight, gamma=gamma)
 
 class MultiTaskSupervisedContrastiveLoss(nn.Module):
     def __init__(self, temperature=0.07):

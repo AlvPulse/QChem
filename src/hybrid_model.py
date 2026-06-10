@@ -94,10 +94,13 @@ class HybridEnsembleVQC(nn.Module):
         # 1. Encode Graph
         graph_emb = self.gnn.forward_features(data) # (batch, 64)
 
+        # Auxiliary Descriptor prediction
+        desc_preds = self.gnn.desc_head(graph_emb)
+
         # 2. Project to Latent Space
         latent = self.projection(graph_emb) # (batch, latent_dim)
 
         # 3. Quantum Ensemble
         logits, _ = self.ensemble(latent) # (batch, n_outputs)
 
-        return logits, latent
+        return logits, latent, desc_preds
