@@ -121,9 +121,9 @@ class Level2Classical(nn.Module):
 
         # Motif -> Local processing (Simulated by depth-wise / independent scalar processing)
         self.mlp_motif = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(hidden_dim, inner_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, inner_dim)
+            nn.Linear(inner_dim, inner_dim)
         )
 
         # Cycle -> Phase/Periodic processing (Simulated by Sine/Cosine activations)
@@ -132,9 +132,9 @@ class Level2Classical(nn.Module):
 
         # Spectral -> Mixing/Interaction (Simulated by dense cross-attention like mixing)
         self.mlp_spectral = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 2),
+            nn.Linear(hidden_dim, inner_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim * 2, inner_dim)
+            nn.Linear(inner_dim, inner_dim)
         )
 
         # Aggregation
