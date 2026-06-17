@@ -11,10 +11,10 @@ class Trainer:
         self.model = model.to(device)
         self.device = device
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=5)
         self.alpha = alpha
         self.lambda_desc = lambda_desc
 
-        # Loss with imbalance handling (Focal Loss under the hood)
         if pos_weight is not None:
             self.criterion_bce = MaskedBCEWithLogitsLoss(pos_weight=pos_weight)
         else:
@@ -51,6 +51,7 @@ class Trainer:
                 loss = self.criterion_bce(logits, batch.y)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
             total_loss += loss.item()
@@ -59,6 +60,8 @@ class Trainer:
 
         metrics = self.calculate_metrics(all_y, all_probs)
         metrics['loss'] = total_loss / len(loader)
+        metrics['y_true'] = np.concatenate(all_y, axis=0) if isinstance(all_y[0], np.ndarray) else np.array(all_y)
+        metrics['y_prob'] = np.concatenate(all_probs, axis=0) if isinstance(all_probs[0], np.ndarray) else np.array(all_probs)
         return metrics
 
     @torch.no_grad()
@@ -90,6 +93,8 @@ class Trainer:
 
         metrics = self.calculate_metrics(all_y, all_probs)
         metrics['loss'] = total_loss / len(loader)
+        metrics['y_true'] = np.concatenate(all_y, axis=0) if isinstance(all_y[0], np.ndarray) else np.array(all_y)
+        metrics['y_prob'] = np.concatenate(all_probs, axis=0) if isinstance(all_probs[0], np.ndarray) else np.array(all_probs)
         return metrics
 
     def calculate_metrics(self, y_true, y_prob):
