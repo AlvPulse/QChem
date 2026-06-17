@@ -24,8 +24,20 @@ def canonical_smiles(s):
     except:
         return None
 
-def atom_features(atom):
-    return np.array([
+from rdkit.Chem import ChemicalFeatures
+from rdkit import RDConfig
+import os
+
+# Initialize Pharmacophore feature factory
+fdefName = os.path.join(RDConfig.RDDataDir, 'BaseFeatures.fdef')
+try:
+    factory = ChemicalFeatures.BuildFeatureFactory(fdefName)
+except:
+    factory = None
+
+def atom_features(atom, mol, conf=None, p_features=None):
+    # Base features
+    base_feat = np.array([
         atom.GetAtomicNum(),
         atom.GetTotalDegree(),
         atom.GetFormalCharge(),
@@ -33,14 +45,78 @@ def atom_features(atom):
         int(atom.GetIsAromatic())
     ], dtype=np.int64)
 
-def bond_features(bond):
+    # Advanced features (Continuous):
+    # - Partial Charge (Gasteiger)
+    # - Electronegativity (approximate using Pauling scale mapping)
+    # - 3D coordinates (x, y, z)
+    # - Pharmacophore tags (Donor, Acceptor, Hydrophobe)
+
+    try:
+        partial_charge = float(atom.GetProp('_GasteigerCharge'))
+        if np.isnan(partial_charge) or np.isinf(partial_charge):
+            partial_charge = 0.0
+    except:
+        partial_charge = 0.0
+
+    # Pauling electronegativity approximation (subset)
+    en_map = {1: 2.20, 6: 2.55, 7: 3.04, 8: 3.44, 9: 3.98, 15: 2.19, 16: 2.58, 17: 3.16, 35: 2.96, 53: 2.66}
+    en = en_map.get(atom.GetAtomicNum(), 2.5) # Default to Carbon
+
+    # 3D Coordinates
+    coords = [0.0, 0.0, 0.0]
+    if conf is not None:
+        pos = conf.GetAtomPosition(atom.GetIdx())
+        coords = [pos.x, pos.y, pos.z]
+
+    # Pharmacophores
+    is_donor = 0.0
+    is_acceptor = 0.0
+    is_hydrophobe = 0.0
+    if p_features is not None:
+        idx = atom.GetIdx()
+        if idx in p_features['Donor']: is_donor = 1.0
+        if idx in p_features['Acceptor']: is_acceptor = 1.0
+        if idx in p_features['Hydrophobe']: is_hydrophobe = 1.0
+
+    continuous_feat = np.array([partial_charge, en] + coords + [is_donor, is_acceptor, is_hydrophobe], dtype=np.float32)
+
+    return base_feat, continuous_feat
+
+def bond_features(bond, conf=None):
     if bond is None:
-        return np.array([0, 0, 0], dtype=np.int64)
+        return np.array([0, 0, 0], dtype=np.int64), np.array([0.0], dtype=np.float32)
     else:
         bt = int(bond.GetBondTypeAsDouble())
         ar = int(bond.GetIsAromatic())
         conj = int(bond.GetIsConjugated())
-        return np.array([bt, ar, conj], dtype=np.int64)
+
+        # Calculate 3D distance if conformer exists
+        distance = 0.0
+        if conf is not None:
+            pos_i = conf.GetAtomPosition(bond.GetBeginAtomIdx())
+            pos_j = conf.GetAtomPosition(bond.GetEndAtomIdx())
+            distance = pos_i.Distance(pos_j)
+
+        return np.array([bt, ar, conj], dtype=np.int64), np.array([distance], dtype=np.float32)
+
+from rdkit.Chem import Descriptors
+from sklearn.preprocessing import StandardScaler
+
+# Global scaler to be fitted after dataset creation
+_desc_scaler = StandardScaler()
+
+def calculate_descriptors(m):
+    # MolWt, LogP, TPSA, HBD, HBA, Rotatable Bonds
+    try:
+        molwt = Descriptors.MolWt(m)
+        logp = Descriptors.MolLogP(m)
+        tpsa = Descriptors.TPSA(m)
+        hbd = Descriptors.NumHDonors(m)
+        hba = Descriptors.NumHAcceptors(m)
+        rotb = Descriptors.NumRotatableBonds(m)
+        return [molwt, logp, tpsa, hbd, hba, rotb]
+    except:
+        return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
 def mol_to_pyg(smiles, y):
     m = Chem.MolFromSmiles(smiles)
@@ -50,28 +126,83 @@ def mol_to_pyg(smiles, y):
     except:
         return None
 
+    # Calculate Auxiliary Descriptors before adding Hs
+    desc = calculate_descriptors(m)
+
+    # Add Hs for 3D embedding and charges
+    m = Chem.AddHs(m)
+
+    # Calculate Gasteiger Charges
+    try:
+        AllChem.ComputeGasteigerCharges(m)
+    except:
+        pass
+
+    # Generate 3D Conformer
+    try:
+        res = AllChem.EmbedMolecule(m, randomSeed=SEED, maxAttempts=50)
+        if res == -1: # Failed to embed
+            conf = None
+        else:
+            # Optimize geometry
+            AllChem.UFFOptimizeMolecule(m, maxIters=200)
+            conf = m.GetConformer()
+    except:
+        conf = None
+
+    # Extract Pharmacophores
+    p_features = {'Donor': set(), 'Acceptor': set(), 'Hydrophobe': set()}
+    if factory is not None:
+        try:
+            feats = factory.GetFeaturesForMol(m)
+            for f in feats:
+                fam = f.GetFamily()
+                for atom_idx in f.GetAtomIds():
+                    if fam == 'Donor': p_features['Donor'].add(atom_idx)
+                    elif fam == 'Acceptor': p_features['Acceptor'].add(atom_idx)
+                    elif fam == 'Hydrophobe': p_features['Hydrophobe'].add(atom_idx)
+        except:
+            pass
+
     # Nodes
-    x = np.vstack([atom_features(a) for a in m.GetAtoms()]).astype(np.int64)
+    x_base = []
+    x_cont = []
+    for a in m.GetAtoms():
+        b_f, c_f = atom_features(a, m, conf, p_features)
+        x_base.append(b_f)
+        x_cont.append(c_f)
+
+    x_base = np.vstack(x_base).astype(np.int64)
+    x_cont = np.vstack(x_cont).astype(np.float32)
 
     # Edges
-    ei_src, ei_dst, eattr = [], [], []
+    ei_src, ei_dst, eattr, eattr_cont = [], [], [], []
     for b in m.GetBonds():
         i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
-        bf = bond_features(b)
+        bf, bf_cont = bond_features(b, conf)
         ei_src += [i, j]; ei_dst += [j, i]
         eattr += [bf, bf]
+        eattr_cont += [bf_cont, bf_cont]
 
     if len(ei_src) == 0:
-        ei_src = [0]; ei_dst = [0]; eattr = [bond_features(None)]
+        ei_src = [0]; ei_dst = [0]
+        bf, bf_cont = bond_features(None)
+        eattr = [bf]
+        eattr_cont = [bf_cont]
 
     edge_index = torch.tensor([ei_src, ei_dst], dtype=torch.long)
     edge_attr = torch.tensor(np.vstack(eattr), dtype=torch.long)
-    x = torch.tensor(x, dtype=torch.long)
+    edge_attr_cont = torch.tensor(np.vstack(eattr_cont), dtype=torch.float32)
+    x = torch.tensor(x_base, dtype=torch.long)
+    x_cont = torch.tensor(x_cont, dtype=torch.float32)
 
     # y is expected to be a list/array of floats (or NaNs)
     y = torch.tensor(y, dtype=torch.float32).view(1, -1)
 
-    return Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y)
+    # Descriptor target
+    y_desc = torch.tensor(desc, dtype=torch.float32).view(1, -1)
+
+    return Data(x=x, x_cont=x_cont, edge_index=edge_index, edge_attr=edge_attr, edge_attr_cont=edge_attr_cont, y=y, y_desc=y_desc)
 
 def scaffold_split(df, seed=SEED):
     # Create scaffold buckets
@@ -166,6 +297,16 @@ def get_dataloaders(batch_size=64, root_dir='.'):
     va_ds = Tox21GraphDataset('.', va_df)
     te_ds = Tox21GraphDataset('.', te_df)
 
+    # Fit scaler on train descriptors and apply to all
+    train_desc = np.vstack([tr_ds.data.y_desc[tr_ds.slices['y_desc'][i]:tr_ds.slices['y_desc'][i+1]].numpy() for i in range(len(tr_ds))])
+    _desc_scaler.fit(train_desc)
+
+    # We must update the underlying batched data object since InMemoryDataset batches everything
+    for ds in [tr_ds, va_ds, te_ds]:
+        if hasattr(ds.data, 'y_desc') and ds.data.y_desc is not None:
+            # Transform the flat contiguous tensor directly
+            ds.data.y_desc = torch.tensor(_desc_scaler.transform(ds.data.y_desc.numpy()), dtype=torch.float32)
+
     # Calculate pos_weights for all tasks
     # Iterate over training data to count positives and negatives per task
     all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, num_tasks)
@@ -234,6 +375,14 @@ def get_toxcast_dataloaders(batch_size=64, root_dir='.'):
     tr_ds = Tox21GraphDataset('.', tr_df)
     va_ds = Tox21GraphDataset('.', va_df)
     te_ds = Tox21GraphDataset('.', te_df)
+
+    # Fit scaler on train descriptors and apply to all
+    train_desc = np.vstack([tr_ds.data.y_desc[tr_ds.slices['y_desc'][i]:tr_ds.slices['y_desc'][i+1]].numpy() for i in range(len(tr_ds))])
+    _desc_scaler.fit(train_desc)
+
+    for ds in [tr_ds, va_ds, te_ds]:
+        if hasattr(ds.data, 'y_desc') and ds.data.y_desc is not None:
+            ds.data.y_desc = torch.tensor(_desc_scaler.transform(ds.data.y_desc.numpy()), dtype=torch.float32)
 
     all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, num_tasks)
 

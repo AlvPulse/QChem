@@ -16,7 +16,11 @@ from src.quantum.diagnostics import compute_gram_matrix, analyze_kernel_variance
 from src.quantum_levels import (
     Level1Classical, Level1Quantum,
     Level2Classical, Level2Quantum,
-    Level3Classical, Level3Quantum
+    Level3Classical, Level3Quantum,
+    Level4Classical, Level4Quantum,
+    Level5Classical, Level5Quantum,
+    Level6Classical, Level6Quantum,
+    Level7Classical, Level7Quantum
 )
 
 def set_seed(seed=42):
@@ -33,7 +37,11 @@ def main():
                             'hybrid_ensemble', 'classical_ensemble', 'rf', 'classical_gnn', 'hybrid_kernel',
                             'level1_classical', 'level1_quantum',
                             'level2_classical', 'level2_quantum',
-                            'level3_classical', 'level3_quantum'
+                            'level3_classical', 'level3_quantum',
+                            'level4_classical', 'level4_quantum',
+                            'level5_classical', 'level5_quantum',
+                            'level6_classical', 'level6_quantum',
+                            'level7_classical', 'level7_quantum'
                         ])
     parser.add_argument('--estimators', type=int, default=4, help='Number of estimators in ensemble')
     parser.add_argument('--qubits', type=int, default=4, help='Number of qubits per estimator')
@@ -116,6 +124,22 @@ def main():
         model = Level3Classical(hidden_dim=64, out_dim=num_tasks, dropout=args.dropout)
     elif args.model == 'level3_quantum':
         model = Level3Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=num_tasks, dropout=args.dropout)
+    elif args.model == 'level4_classical':
+        model = Level4Classical(hidden_dim=64, out_dim=num_tasks, dropout=args.dropout)
+    elif args.model == 'level4_quantum':
+        model = Level4Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=num_tasks, dropout=args.dropout)
+    elif args.model == 'level5_classical':
+        model = Level5Classical(hidden_dim=64, out_dim=num_tasks, dropout=args.dropout)
+    elif args.model == 'level5_quantum':
+        model = Level5Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=num_tasks, dropout=args.dropout)
+    elif args.model == 'level6_classical':
+        model = Level6Classical(hidden_dim=64, out_dim=num_tasks, dropout=args.dropout)
+    elif args.model == 'level6_quantum':
+        model = Level6Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=num_tasks, dropout=args.dropout)
+    elif args.model == 'level7_classical':
+        model = Level7Classical(hidden_dim=64, out_dim=num_tasks, dropout=args.dropout)
+    elif args.model == 'level7_quantum':
+        model = Level7Quantum(hidden_dim=64, n_qubits=args.qubits, q_layers=args.layers, out_dim=num_tasks, dropout=args.dropout)
     else:
         raise ValueError(f"Unknown model: {args.model}")
 
