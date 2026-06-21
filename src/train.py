@@ -60,8 +60,8 @@ class Trainer:
 
         metrics = self.calculate_metrics(all_y, all_probs)
         metrics['loss'] = total_loss / len(loader)
-        metrics['y_true'] = np.concatenate(all_y, axis=0) if isinstance(all_y[0], np.ndarray) else np.array(all_y)
-        metrics['y_prob'] = np.concatenate(all_probs, axis=0) if isinstance(all_probs[0], np.ndarray) else np.array(all_probs)
+        metrics['y_true'] = np.array(all_y)
+        metrics['y_prob'] = np.array(all_probs)
         return metrics
 
     @torch.no_grad()
@@ -93,8 +93,8 @@ class Trainer:
 
         metrics = self.calculate_metrics(all_y, all_probs)
         metrics['loss'] = total_loss / len(loader)
-        metrics['y_true'] = np.concatenate(all_y, axis=0) if isinstance(all_y[0], np.ndarray) else np.array(all_y)
-        metrics['y_prob'] = np.concatenate(all_probs, axis=0) if isinstance(all_probs[0], np.ndarray) else np.array(all_probs)
+        metrics['y_true'] = np.array(all_y)
+        metrics['y_prob'] = np.array(all_probs)
         return metrics
 
     def calculate_metrics(self, y_true, y_prob):
