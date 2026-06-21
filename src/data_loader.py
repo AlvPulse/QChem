@@ -249,6 +249,111 @@ class Tox21GraphDataset(InMemoryDataset):
                 data_list.append(graph)
         return self.collate(data_list)
 
+def _compute_pos_weights(tr_ds, num_tasks):
+    """Per-task pos_weight = n_neg / n_pos over the training split, NaN-aware."""
+    all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, num_tasks)
+
+    pos_weights = []
+    for i in range(num_tasks):
+        y_task = all_y_tr[:, i]
+        valid_mask = ~np.isnan(y_task)
+        if valid_mask.sum() > 0:
+            y_valid = y_task[valid_mask]
+            n_pos = (y_valid == 1).sum()
+            n_neg = (y_valid == 0).sum()
+            weight = n_neg / max(n_pos, 1)
+        else:
+            weight = 1.0
+        pos_weights.append(weight)
+
+    return torch.tensor(pos_weights, dtype=torch.float32)
+
+
+def _finalize_loaders(tr_df, va_df, te_df, num_tasks, batch_size):
+    """
+    Shared pipeline tail used by every dataset entry point: featurize the three
+    scaffold splits, fit the descriptor scaler on train only, and build loaders.
+    Returns: train_loader, val_loader, test_loader, pos_weights, num_tasks
+    """
+    # PyG Datasets (featurized via mol_to_pyg: graphs, 3D conformers, x_cont, descriptors)
+    tr_ds = Tox21GraphDataset('.', tr_df)
+    va_ds = Tox21GraphDataset('.', va_df)
+    te_ds = Tox21GraphDataset('.', te_df)
+
+    # Fit descriptor scaler on TRAIN only, then apply to all splits (no leakage).
+    train_desc = np.vstack([tr_ds.data.y_desc[tr_ds.slices['y_desc'][i]:tr_ds.slices['y_desc'][i+1]].numpy() for i in range(len(tr_ds))])
+    _desc_scaler.fit(train_desc)
+
+    for ds in [tr_ds, va_ds, te_ds]:
+        if hasattr(ds.data, 'y_desc') and ds.data.y_desc is not None:
+            ds.data.y_desc = torch.tensor(_desc_scaler.transform(ds.data.y_desc.numpy()), dtype=torch.float32)
+
+    pos_weights = _compute_pos_weights(tr_ds, num_tasks)
+
+    # Note: WeightedRandomSampler is tricky with multi-task; we use standard shuffling.
+    train_loader = DataLoader(tr_ds, batch_size=batch_size, shuffle=True)
+    val_loader = DataLoader(va_ds, batch_size=batch_size, shuffle=False)
+    test_loader = DataLoader(te_ds, batch_size=batch_size, shuffle=False)
+
+    return train_loader, val_loader, test_loader, pos_weights, num_tasks
+
+
+def _load_moleculenet_labels(name, root_dir='.'):
+    """
+    Load a MoleculeNet dataset and return {canonical_smiles: label_vector} plus the
+    task count. Missing labels are already NaN in PyG's MoleculeNet.
+    """
+    from torch_geometric.datasets import MoleculeNet
+
+    dataset = MoleculeNet(root=os.path.join(root_dir, 'data'), name=name)
+    n_tasks = dataset[0].y.shape[1]
+
+    label_map = {}
+    for data in dataset:
+        smi = canonical_smiles(data.smiles)
+        if smi is None:
+            continue
+        # Last write wins on duplicate scaffolds/SMILES; acceptable for our use.
+        label_map[smi] = data.y.squeeze(0).numpy().astype(np.float32)  # (n_tasks,) with NaN
+    return label_map, n_tasks
+
+
+def build_merged_dataframe(root_dir='.', datasets=('Tox21', 'ToxCast')):
+    """
+    Merge several MoleculeNet datasets into one multi-task DataFrame keyed by
+    canonical SMILES. Each dataset occupies a contiguous block of label columns;
+    a molecule absent from a dataset has NaN for that block (handled downstream by
+    the masked BCE loss). Default Tox21 (12) + ToxCast (617) -> 629 tasks.
+    Returns: (df with columns ['smiles', 'label'], total_num_tasks)
+    """
+    label_maps, task_counts = [], []
+    for name in datasets:
+        m, n = _load_moleculenet_labels(name, root_dir)
+        label_maps.append(m)
+        task_counts.append(n)
+
+    total_tasks = int(sum(task_counts))
+    offsets = np.cumsum([0] + task_counts[:-1]).astype(int)
+
+    all_smiles = set()
+    for m in label_maps:
+        all_smiles.update(m.keys())
+
+    rows = []
+    for smi in sorted(all_smiles):
+        label = np.full(total_tasks, np.nan, dtype=np.float32)
+        for k, m in enumerate(label_maps):
+            if smi in m:
+                off = offsets[k]
+                label[off:off + task_counts[k]] = m[smi]
+        rows.append({'smiles': smi, 'label': label.tolist()})
+
+    df = pd.DataFrame(rows)
+    print(f"Merged {datasets} -> {len(df)} unique molecules, {total_tasks} tasks "
+          f"(blocks: {dict(zip(datasets, task_counts))})")
+    return df, total_tasks
+
+
 def get_dataloaders(batch_size=64, root_dir='.'):
     # Load and preprocess
     csv_path = os.path.join(root_dir, "EDA_dataset.csv")
@@ -291,51 +396,7 @@ def get_dataloaders(batch_size=64, root_dir='.'):
 
     # Scaffold Split
     tr_df, va_df, te_df = scaffold_split(df)
-
-    # PyG Datasets
-    tr_ds = Tox21GraphDataset('.', tr_df)
-    va_ds = Tox21GraphDataset('.', va_df)
-    te_ds = Tox21GraphDataset('.', te_df)
-
-    # Fit scaler on train descriptors and apply to all
-    train_desc = np.vstack([tr_ds.data.y_desc[tr_ds.slices['y_desc'][i]:tr_ds.slices['y_desc'][i+1]].numpy() for i in range(len(tr_ds))])
-    _desc_scaler.fit(train_desc)
-
-    # We must update the underlying batched data object since InMemoryDataset batches everything
-    for ds in [tr_ds, va_ds, te_ds]:
-        if hasattr(ds.data, 'y_desc') and ds.data.y_desc is not None:
-            # Transform the flat contiguous tensor directly
-            ds.data.y_desc = torch.tensor(_desc_scaler.transform(ds.data.y_desc.numpy()), dtype=torch.float32)
-
-    # Calculate pos_weights for all tasks
-    # Iterate over training data to count positives and negatives per task
-    all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, num_tasks)
-
-    pos_weights = []
-    for i in range(num_tasks):
-        y_task = all_y_tr[:, i]
-        # Ignore NaNs
-        valid_mask = ~np.isnan(y_task)
-        if valid_mask.sum() > 0:
-            y_valid = y_task[valid_mask]
-            n_pos = (y_valid == 1).sum()
-            n_neg = (y_valid == 0).sum()
-            weight = n_neg / max(n_pos, 1)
-        else:
-            weight = 1.0
-        pos_weights.append(weight)
-
-    pos_weights = torch.tensor(pos_weights, dtype=torch.float32)
-
-    # Note: WeightedRandomSampler is tricky with multi-task.
-    # Usually standard shuffling is used, or a sampler based on the presence of ANY active task.
-    # For now, we use standard shuffling for train_loader.
-
-    train_loader = DataLoader(tr_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(va_ds, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(te_ds, batch_size=batch_size, shuffle=False)
-
-    return train_loader, val_loader, test_loader, pos_weights, num_tasks
+    return _finalize_loaders(tr_df, va_df, te_df, num_tasks, batch_size)
 
 
 def get_toxcast_dataloaders(batch_size=64, root_dir='.'):
@@ -343,66 +404,54 @@ def get_toxcast_dataloaders(batch_size=64, root_dir='.'):
     Downloads and prepares the ToxCast dataset using PyTorch Geometric's MoleculeNet.
     Returns: train_loader, val_loader, test_loader, pos_weights, num_tasks
     """
-    from torch_geometric.datasets import MoleculeNet
+    label_map, num_tasks = _load_moleculenet_labels('ToxCast', root_dir)
+    df = pd.DataFrame([{'smiles': smi, 'label': lab.tolist()} for smi, lab in label_map.items()])
 
-    # We download the dataset using PyG
-    dataset = MoleculeNet(root=os.path.join(root_dir, 'data'), name='ToxCast')
-    num_tasks = dataset[0].y.shape[1]
-
-    # We want to format this into our scaffold split df format to keep things consistent.
-    # PyG MoleculeNet provides smiles in data.smiles
-    data_list = []
-    for data in dataset:
-        data_list.append({
-            'smiles': data.smiles,
-            'label': data.y.squeeze(0).tolist() # converting tensor of shape (1, num_tasks) to list
-        })
-
-    df = pd.DataFrame(data_list)
-
-    # Clean
-    df['smiles'] = df['smiles'].apply(canonical_smiles)
-    df = df.dropna(subset=['smiles'])
-    df = df.drop_duplicates(subset=['smiles'])
-
-    # Filter out rows with incorrect label length
+    # Filter out rows with incorrect label length (defensive)
     df = df[df['label'].apply(len) == num_tasks]
 
-    # Scaffold Split
     tr_df, va_df, te_df = scaffold_split(df)
+    return _finalize_loaders(tr_df, va_df, te_df, num_tasks, batch_size)
 
-    # PyG Datasets
-    tr_ds = Tox21GraphDataset('.', tr_df)
-    va_ds = Tox21GraphDataset('.', va_df)
-    te_ds = Tox21GraphDataset('.', te_df)
 
-    # Fit scaler on train descriptors and apply to all
-    train_desc = np.vstack([tr_ds.data.y_desc[tr_ds.slices['y_desc'][i]:tr_ds.slices['y_desc'][i+1]].numpy() for i in range(len(tr_ds))])
-    _desc_scaler.fit(train_desc)
+class CachedGraphDataset(Tox21GraphDataset):
+    """An InMemoryDataset reconstructed from a cached (data, slices) payload,
+    skipping the (slow) mol_to_pyg + 3D-conformer featurization."""
+    def __init__(self, data, slices, root='.'):
+        InMemoryDataset.__init__(self, root)
+        self.data, self.slices = data, slices
 
-    for ds in [tr_ds, va_ds, te_ds]:
-        if hasattr(ds.data, 'y_desc') and ds.data.y_desc is not None:
-            ds.data.y_desc = torch.tensor(_desc_scaler.transform(ds.data.y_desc.numpy()), dtype=torch.float32)
 
-    all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, num_tasks)
+def get_or_build_merged_dataset(root_dir='.', datasets=('Tox21', 'ToxCast'), cache_path=None):
+    """
+    Build the featurized merged dataset once and cache it to disk; subsequent calls
+    load the cache instead of re-running 3D conformer embedding for ~10k molecules.
+    Returns: (dataset, num_tasks).
+    """
+    if cache_path is None:
+        cache_path = os.path.join(root_dir, 'data', f"featurized_{'_'.join(datasets)}.pt")
 
-    pos_weights = []
-    for i in range(num_tasks):
-        y_task = all_y_tr[:, i]
-        valid_mask = ~np.isnan(y_task)
-        if valid_mask.sum() > 0:
-            y_valid = y_task[valid_mask]
-            n_pos = (y_valid == 1).sum()
-            n_neg = (y_valid == 0).sum()
-            weight = n_neg / max(n_pos, 1)
-        else:
-            weight = 1.0
-        pos_weights.append(weight)
+    if os.path.exists(cache_path):
+        payload = torch.load(cache_path, weights_only=False)
+        ds = CachedGraphDataset(payload['data'], payload['slices'])
+        print(f"Loaded cached featurized dataset from {cache_path} ({len(ds)} graphs, {payload['num_tasks']} tasks)")
+        return ds, int(payload['num_tasks'])
 
-    pos_weights = torch.tensor(pos_weights, dtype=torch.float32)
+    df, num_tasks = build_merged_dataframe(root_dir, datasets=datasets)
+    ds = Tox21GraphDataset('.', df)
+    os.makedirs(os.path.dirname(cache_path) or '.', exist_ok=True)
+    torch.save({'data': ds.data, 'slices': ds.slices, 'num_tasks': num_tasks}, cache_path)
+    print(f"Cached featurized dataset to {cache_path} ({len(ds)} graphs)")
+    return ds, int(num_tasks)
 
-    train_loader = DataLoader(tr_ds, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(va_ds, batch_size=batch_size, shuffle=False)
-    test_loader = DataLoader(te_ds, batch_size=batch_size, shuffle=False)
 
-    return train_loader, val_loader, test_loader, pos_weights, num_tasks
+def get_merged_dataloaders(batch_size=64, root_dir='.', datasets=('Tox21', 'ToxCast')):
+    """
+    Merge multiple MoleculeNet toxicity datasets into a single multi-task problem.
+    Molecules missing from a given dataset get NaN labels for that block, which the
+    masked BCE / contrastive losses already ignore. Default: Tox21 + ToxCast (629 tasks).
+    Returns: train_loader, val_loader, test_loader, pos_weights, num_tasks
+    """
+    df, num_tasks = build_merged_dataframe(root_dir, datasets=datasets)
+    tr_df, va_df, te_df = scaffold_split(df)
+    return _finalize_loaders(tr_df, va_df, te_df, num_tasks, batch_size)

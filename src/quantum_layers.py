@@ -35,6 +35,14 @@ class QuantumLayer(nn.Module):
                         if n_qubits > 1:
                             for i in range(n_qubits):
                                 qml.CNOT(wires=[i, (i+1)%n_qubits])
+                elif ansatz == 'separable':
+                    # Ablation: single-qubit rotations only, NO entanglement.
+                    # Used as the "separable" control in the benchmark suite to test
+                    # whether entanglement (not just added parameters) drives any gain.
+                    for l in range(n_layers):
+                        for i in range(n_qubits):
+                            qml.RY(weights[l, i, 0], wires=i)
+                            qml.RZ(weights[l, i, 1], wires=i)
 
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
@@ -47,6 +55,8 @@ class QuantumLayer(nn.Module):
         elif ansatz == 'mps':
             self.weights = nn.Parameter(torch.randn(n_layers, n_qubits))
         elif ansatz == 'hea':
+            self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 2))
+        elif ansatz == 'separable':
             self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 2))
 
     def forward(self, x):

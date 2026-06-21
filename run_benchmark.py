@@ -1,242 +1,271 @@
 import os
+import argparse
+import functools
 import torch
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_auc_score, average_precision_score
 from scipy.stats import wilcoxon
 from torch_geometric.loader import DataLoader
 from src.train import Trainer
 from src.quantum_levels import *
 from src.baselines import *
-from torch_geometric.datasets import MoleculeNet
-import matplotlib.pyplot as plt
-import seaborn as sns
+from src.data_loader import get_or_build_merged_dataset
+
+_CLASSICAL = {
+    1: Level1Classical, 2: Level2Classical, 3: Level3Classical, 4: Level4Classical,
+    5: Level5Classical, 6: Level6Classical, 7: Level7Classical,
+}
+_QUANTUM = {
+    1: Level1Quantum, 2: Level2Quantum, 3: Level3Quantum, 4: Level4Quantum,
+    5: Level5Quantum, 6: Level6Quantum, 7: Level7Quantum,
+}
+
 
 def get_param_count(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
+
+@functools.lru_cache(maxsize=None)
+def _quantum_param_count(level, scale, layers, num_tasks):
+    """Param count of a quantum level. Cached: independent of fold/seed."""
+    return get_param_count(_QUANTUM[level](hidden_dim=64, n_qubits=scale, q_layers=layers,
+                                           out_dim=num_tasks, ansatz='strong'))
+
+
+@functools.lru_cache(maxsize=None)
 def match_classical_inner_dim(target_params, level, num_tasks, in_dim=64):
-    best_inner = 1
-    min_diff = float('inf')
-
+    """Smallest classical inner_dim whose param count best matches target_params.
+    Cached so the (expensive) search runs once per (level, target), not per fold."""
+    best_inner, min_diff = 1, float('inf')
     for inner in range(1, 513):
-        if level == 1:
-            temp_model = Level1Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
-        elif level == 2:
-            temp_model = Level2Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
-        elif level == 3:
-            temp_model = Level3Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
-        elif level == 4:
-            temp_model = Level4Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
-        elif level == 5:
-            temp_model = Level5Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
-        elif level == 6:
-            temp_model = Level6Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
-        elif level == 7:
-            temp_model = Level7Classical(hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner)
-
-        params = get_param_count(temp_model)
+        params = get_param_count(_CLASSICAL[level](hidden_dim=in_dim, out_dim=num_tasks, inner_dim=inner))
         diff = abs(params - target_params)
-
         if diff < min_diff:
-            min_diff = diff
-            best_inner = inner
-
+            min_diff, best_inner = diff, inner
         if params > target_params and diff > min_diff:
             break
-
     return best_inner
 
-def bootstrap_metrics(y_true, y_prob, n_resamples=1000):
-    from sklearn.metrics import roc_auc_score, average_precision_score
+
+def create_model(level, scale, layers, num_tasks, m_type):
+    if m_type == 'quantum':
+        return _QUANTUM[level](hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
+    if m_type == 'separable':
+        return _QUANTUM[level](hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
+    if m_type == 'classical':
+        q_params = _quantum_param_count(level, scale, layers, num_tasks)
+        inner = match_classical_inner_dim(q_params, level, num_tasks, 64)
+        return _CLASSICAL[level](hidden_dim=64, out_dim=num_tasks, inner_dim=inner)
+    raise ValueError(m_type)
+
+
+def per_task_auc(y_true, y_prob):
+    """Per-task ROC-AUC over pooled CV predictions (NaN where not computable)."""
+    aucs = np.full(y_true.shape[1], np.nan)
+    for t in range(y_true.shape[1]):
+        valid = ~np.isnan(y_true[:, t])
+        yt, yp = y_true[valid, t], y_prob[valid, t]
+        if len(np.unique(yt)) > 1:
+            try:
+                aucs[t] = roc_auc_score(yt, yp)
+            except ValueError:
+                pass
+    return aucs
+
+
+def paired_task_test(auc_a, auc_b):
+    """Paired Wilcoxon across tasks (high power: hundreds of paired tasks, unlike the
+    n=5 fold-level test whose minimum achievable two-sided p is 0.0625). Returns
+    (p_value, median_delta, n_tasks) where delta = auc_a - auc_b per task."""
+    mask = ~np.isnan(auc_a) & ~np.isnan(auc_b)
+    if mask.sum() < 1:
+        return 1.0, 0.0, 0
+    delta = auc_a[mask] - auc_b[mask]
+    median_delta = float(np.median(delta))
+    if np.allclose(delta, 0):
+        return 1.0, median_delta, int(mask.sum())
+    try:
+        p = wilcoxon(auc_a[mask], auc_b[mask]).pvalue
+    except ValueError:
+        p = 1.0
+    return float(p), median_delta, int(mask.sum())
+
+
+def bootstrap_metrics(y_true, y_prob, n_resamples=500, n_tasks_sample=20, seed=0):
+    rng = np.random.default_rng(seed)
     roc_aucs, pr_aucs = [], []
     n_samples = len(y_true)
+    n_tasks = y_true.shape[1]
     for _ in range(n_resamples):
-        indices = np.random.choice(n_samples, n_samples, replace=True)
-        y_true_b = y_true[indices]
-        y_prob_b = y_prob[indices]
-
+        idx = rng.integers(0, n_samples, n_samples)
+        yt_b, yp_b = y_true[idx], y_prob[idx]
+        tasks = rng.choice(n_tasks, min(n_tasks_sample, n_tasks), replace=False)
         r, p = [], []
-        # Speed optimization: Only sample 10 tasks instead of all 617 to speed up bootstrap
-        tasks_to_eval = np.random.choice(y_true_b.shape[1], min(10, y_true_b.shape[1]), replace=False)
-        for i in tasks_to_eval:
-            valid = ~np.isnan(y_true_b[:, i])
-            yt = y_true_b[valid, i]
-            yp = y_prob_b[valid, i]
+        for i in tasks:
+            valid = ~np.isnan(yt_b[:, i])
+            yt, yp = yt_b[valid, i], yp_b[valid, i]
             if len(np.unique(yt)) > 1:
                 try:
                     r.append(roc_auc_score(yt, yp))
                     p.append(average_precision_score(yt, yp))
-                except:
+                except ValueError:
                     pass
-        if r: roc_aucs.append(np.mean(r))
-        if p: pr_aucs.append(np.mean(p))
-
-    if not roc_aucs: return (0.5, 0.5), (0.0, 0.0)
+        if r:
+            roc_aucs.append(np.mean(r))
+            pr_aucs.append(np.mean(p))
+    if not roc_aucs:
+        return (0.5, 0.5), (0.0, 0.0)
     return (np.percentile(roc_aucs, 2.5), np.percentile(roc_aucs, 97.5)), \
            (np.percentile(pr_aucs, 2.5), np.percentile(pr_aucs, 97.5))
 
-def create_model(level, scale, layers, num_tasks, m_type):
-    if m_type == 'quantum':
-        if level == 1: return Level1Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
-        if level == 2: return Level2Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
-        if level == 3: return Level3Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
-        if level == 4: return Level4Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
-        if level == 5: return Level5Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
-        if level == 6: return Level6Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
-        if level == 7: return Level7Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
-    elif m_type == 'separable':
-        if level == 1: return Level1Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
-        if level == 2: return Level2Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
-        if level == 3: return Level3Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
-        if level == 4: return Level4Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
-        if level == 5: return Level5Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
-        if level == 6: return Level6Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
-        if level == 7: return Level7Quantum(hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
-    elif m_type == 'classical':
-        temp_q = create_model(level, scale, layers, num_tasks, 'quantum')
-        q_params = get_param_count(temp_q)
-        inner = match_classical_inner_dim(q_params, level, num_tasks, 64)
-        if level == 1: return Level1Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner)
-        if level == 2: return Level2Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner)
-        if level == 3: return Level3Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner)
-        if level == 4: return Level4Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner)
-        if level == 5: return Level5Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner)
-        if level == 6: return Level6Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner)
-        if level == 7: return Level7Classical(hidden_dim=64, out_dim=num_tasks, inner_dim=inner)
+
+def compute_pos_weight(tr_ds, num_tasks, device):
+    all_labels = torch.cat([data.y for data in tr_ds], dim=0)
+    pos_weight = []
+    for t in range(num_tasks):
+        valid = ~torch.isnan(all_labels[:, t])
+        pos = all_labels[valid, t].sum().item()
+        neg = valid.sum().item() - pos
+        pos_weight.append(neg / (pos + 1e-5))
+    return torch.tensor(pos_weight, dtype=torch.float32).to(device)
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Quantum vs separable vs parameter-matched classical CV benchmark")
+    p.add_argument('--levels', type=int, nargs='+', default=[1, 2, 3, 4, 5, 6, 7])
+    p.add_argument('--qubits', type=int, nargs='+', default=[4, 6])
+    p.add_argument('--folds', type=int, default=5)
+    p.add_argument('--epochs', type=int, default=100)
+    p.add_argument('--patience', type=int, default=15)
+    p.add_argument('--layers', type=int, default=2)
+    p.add_argument('--batch_size', type=int, default=128)
+    p.add_argument('--bootstrap', type=int, default=500)
+    p.add_argument('--datasets', type=str, nargs='+', default=['Tox21', 'ToxCast'])
+    p.add_argument('--no_cache', action='store_true', help='Re-featurize instead of using the disk cache')
+    p.add_argument('--out', type=str, default='results/benchmark_cv_results.csv')
+    p.add_argument('--quick', action='store_true',
+                   help='Fast smoke run: levels 1-3, 4 qubits, 3 folds, 20 epochs')
+    return p.parse_args()
+
 
 def main():
+    args = parse_args()
+    if args.quick:
+        args.levels, args.qubits, args.folds, args.epochs, args.patience = [1, 2, 3], [4], 3, 20, 8
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Benchmarking on {device} (Phase 1 5-Fold CV Suite)")
+    print(f"Benchmarking on {device} | levels={args.levels} qubits={args.qubits} "
+          f"folds={args.folds} epochs<={args.epochs} (patience {args.patience})")
 
-    dataset_name = 'toxcast'
-    batch_size = 128
+    cache_path = None if args.no_cache else os.path.join('data', f"featurized_{'_'.join(args.datasets)}.pt")
+    dataset, num_tasks = get_or_build_merged_dataset(root_dir='.', datasets=tuple(args.datasets), cache_path=cache_path)
+    num_tasks = int(num_tasks)
 
-    print(f"Loading {dataset_name.capitalize()} Data...")
-
-    dataset = MoleculeNet(root='data', name='ToxCast')
-    num_tasks = dataset[0].y.shape[1]
-
-    # For StratifiedKFold, stratify by the first task
-    y_stratify = []
-    for i in range(len(dataset)):
-        val = dataset[i].y[0, 0].item()
-        y_stratify.append(val if not np.isnan(val) else 0.0)
-
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-    qubit_scales = [4, 6]
-    layers = 2
-    epochs = 200
-    patience = 20
+    # Stratify by the first task (NaN -> 0 for stratification purposes only)
+    y_stratify = [(dataset[i].y[0, 0].item() if not np.isnan(dataset[i].y[0, 0].item()) else 0.0)
+                  for i in range(len(dataset))]
+    skf = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=42)
 
     all_results = []
+    model_types = ['classical', 'separable', 'quantum']
 
-    for level in [1, 2, 3, 4, 5, 6, 7]:
-        for scale in qubit_scales:
-            print(f"\n--- Evaluating Level {level} (Qubits: {scale}) ---")
-
-            fold_rocs = {'quantum': [], 'separable': [], 'classical': []}
-            pooled_probs = {'quantum': [], 'separable': [], 'classical': []}
-            pooled_trues = {'quantum': [], 'separable': [], 'classical': []}
-
-            # Array of indices to split
+    for level in args.levels:
+        for scale in args.qubits:
+            print(f"\n--- Level {level} (Qubits: {scale}) ---")
+            fold_rocs = {m: [] for m in model_types}
+            pooled_probs = {m: [] for m in model_types}
+            pooled_trues = {m: [] for m in model_types}
             indices = np.arange(len(dataset))
 
             for fold, (train_idx, test_idx) in enumerate(skf.split(indices, y_stratify)):
-                print(f"Fold {fold+1}/5")
-
-                # Validation set is 10% of training set
-                np.random.seed(42 + fold)
+                rng = np.random.default_rng(42 + fold)
                 val_size = int(0.1 * len(train_idx))
-                val_choice = np.random.choice(len(train_idx), val_size, replace=False)
+                val_choice = rng.choice(len(train_idx), val_size, replace=False)
                 val_idx = train_idx[val_choice]
                 train_idx = np.delete(train_idx, val_choice)
 
-                tr_ds = dataset[train_idx]
-                va_ds = dataset[val_idx]
-                te_ds = dataset[test_idx]
+                tr_ds, va_ds, te_ds = dataset[train_idx], dataset[val_idx], dataset[test_idx]
+                tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True)
+                va_loader = DataLoader(va_ds, batch_size=args.batch_size, shuffle=False)
+                te_loader = DataLoader(te_ds, batch_size=args.batch_size, shuffle=False)
+                pos_weight = compute_pos_weight(tr_ds, num_tasks, device)
 
-                tr_loader = DataLoader(tr_ds, batch_size=batch_size, shuffle=True)
-                va_loader = DataLoader(va_ds, batch_size=batch_size, shuffle=False)
-                te_loader = DataLoader(te_ds, batch_size=batch_size, shuffle=False)
-
-                # Pos weights handling imbalance
-                # Extract all ys from train ds
-                all_labels = torch.cat([data.y for data in tr_ds], dim=0)
-                pos_weight = []
-                for t in range(num_tasks):
-                    valid = ~torch.isnan(all_labels[:, t])
-                    pos = all_labels[valid, t].sum().item()
-                    neg = valid.sum().item() - pos
-                    pos_weight.append(neg / (pos + 1e-5))
-                pos_weight = torch.tensor(pos_weight, dtype=torch.float32).to(device)
-
-                models = ['classical', 'separable', 'quantum']
-                for m_type in models:
-                    model = create_model(level, scale, layers, num_tasks, m_type)
+                for m_type in model_types:
+                    # Same init seed across model types within a fold -> reproducible & comparable.
+                    torch.manual_seed(1000 * fold + 7)
+                    model = create_model(level, scale, args.layers, num_tasks, m_type)
                     trainer = Trainer(model, device, pos_weight)
 
-                    best_val_loss = float('inf')
-                    epochs_no_improve = 0
-
-                    for ep in range(epochs):
+                    best_val_loss, no_improve = float('inf'), 0
+                    for ep in range(args.epochs):
                         trainer.train_epoch(tr_loader)
                         va_mets = trainer.evaluate(va_loader)
                         trainer.scheduler.step(va_mets['loss'])
-
                         if va_mets['loss'] < best_val_loss:
-                            best_val_loss = va_mets['loss']
-                            epochs_no_improve = 0
+                            best_val_loss, no_improve = va_mets['loss'], 0
                         else:
-                            epochs_no_improve += 1
-                            if epochs_no_improve >= patience:
-                                print(f"Early stopping at epoch {ep} for {m_type}")
+                            no_improve += 1
+                            if no_improve >= args.patience:
                                 break
 
                     te_mets = trainer.evaluate(te_loader)
                     fold_rocs[m_type].append(te_mets['roc_auc'])
-
                     pooled_probs[m_type].append(te_mets['y_prob'])
                     pooled_trues[m_type].append(te_mets['y_true'])
+                    print(f"  fold {fold+1}/{args.folds} {m_type:10s} "
+                          f"test macro-ROC {te_mets['roc_auc']:.4f} (stopped ep {ep+1})")
 
-            for m_type in models:
-                pooled_probs[m_type] = np.vstack(pooled_probs[m_type])
-                pooled_trues[m_type] = np.vstack(pooled_trues[m_type])
+            for m in model_types:
+                pooled_probs[m] = np.vstack(pooled_probs[m])
+                pooled_trues[m] = np.vstack(pooled_trues[m])
 
-            try:
-                p_classical = wilcoxon(fold_rocs['quantum'], fold_rocs['classical']).pvalue
-            except ValueError:
-                p_classical = 1.0
+            # --- Significance ---
+            # Fold-level Wilcoxon (low power: with n=5 folds the smallest possible
+            # two-sided p is 0.0625, so it can essentially never reach 0.05). Kept for reference.
+            def fold_p(a, b):
+                try:
+                    return min(1.0, wilcoxon(a, b).pvalue * 2)
+                except ValueError:
+                    return 1.0
+            p_fold_classical = fold_p(fold_rocs['quantum'], fold_rocs['classical'])
+            p_fold_separable = fold_p(fold_rocs['quantum'], fold_rocs['separable'])
 
-            try:
-                p_separable = wilcoxon(fold_rocs['quantum'], fold_rocs['separable']).pvalue
-            except ValueError:
-                p_separable = 1.0
+            # Per-task paired Wilcoxon over pooled CV predictions (hundreds of paired
+            # tasks -> properly powered, and directly tests "is quantum better per task").
+            auc = {m: per_task_auc(pooled_trues[m], pooled_probs[m]) for m in model_types}
+            p_task_classical, d_classical, n_c = paired_task_test(auc['quantum'], auc['classical'])
+            p_task_separable, d_separable, n_s = paired_task_test(auc['quantum'], auc['separable'])
+            p_task_classical = min(1.0, p_task_classical * 2)  # Bonferroni (2 comparisons)
+            p_task_separable = min(1.0, p_task_separable * 2)
 
-            p_classical = min(1.0, p_classical * 2)
-            p_separable = min(1.0, p_separable * 2)
+            print(f"  Q vs Classical: per-task p={p_task_classical:.4g} "
+                  f"(median dAUC {d_classical:+.4f}, {n_c} tasks) | fold p={p_fold_classical:.4g}")
+            print(f"  Q vs Separable: per-task p={p_task_separable:.4g} "
+                  f"(median dAUC {d_separable:+.4f}, {n_s} tasks) | fold p={p_fold_separable:.4g}")
 
-            print(f"Wilcoxon p-val (Q vs C): {p_classical:.4f}")
-            print(f"Wilcoxon p-val (Q vs Sep): {p_separable:.4f}")
-
-            for m_type in models:
-                mean_roc = np.mean(fold_rocs[m_type])
-                std_roc = np.std(fold_rocs[m_type])
-                ci_roc, ci_pr = bootstrap_metrics(pooled_trues[m_type], pooled_probs[m_type])
-
+            for m in model_types:
+                ci_roc, ci_pr = bootstrap_metrics(pooled_trues[m], pooled_probs[m], n_resamples=args.bootstrap)
                 all_results.append({
-                    'Level': level, 'Qubits': scale, 'Model': m_type,
-                    'ROC_AUC_CV_Mean': mean_roc, 'ROC_AUC_CV_Std': std_roc,
+                    'Level': level, 'Qubits': scale, 'Model': m,
+                    'ROC_AUC_CV_Mean': float(np.mean(fold_rocs[m])),
+                    'ROC_AUC_CV_Std': float(np.std(fold_rocs[m])),
                     'ROC_CI_95': ci_roc, 'PR_CI_95': ci_pr,
-                    'p_val_vs_classical': p_classical if m_type == 'quantum' else np.nan,
-                    'p_val_vs_separable': p_separable if m_type == 'quantum' else np.nan
+                    'p_task_vs_classical': p_task_classical if m == 'quantum' else np.nan,
+                    'p_task_vs_separable': p_task_separable if m == 'quantum' else np.nan,
+                    'median_dAUC_vs_classical': d_classical if m == 'quantum' else np.nan,
+                    'median_dAUC_vs_separable': d_separable if m == 'quantum' else np.nan,
+                    'p_fold_vs_classical': p_fold_classical if m == 'quantum' else np.nan,
+                    'p_fold_vs_separable': p_fold_separable if m == 'quantum' else np.nan,
                 })
 
-    df_res = pd.DataFrame(all_results)
-    os.makedirs('results', exist_ok=True)
-    df_res.to_csv('results/benchmark_cv_results.csv', index=False)
-    print("Benchmark saved.")
+            # Incremental save so a long run is never lost.
+            os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
+            pd.DataFrame(all_results).to_csv(args.out, index=False)
+
+    print(f"\nBenchmark saved to {args.out}")
+
 
 if __name__ == "__main__":
     main()
