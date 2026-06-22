@@ -187,6 +187,12 @@ def parse_args():
     p.add_argument('--batch_size', type=int, default=128)
     p.add_argument('--bootstrap', type=int, default=500)
     p.add_argument('--datasets', type=str, nargs='+', default=['Tox21', 'ToxCast'])
+    p.add_argument('--tasks', type=str, default='all',
+                   help="Restrict training+eval to one source block (e.g. 'Tox21') or 'all'. "
+                        "Restricting to the learnable Tox21 block prevents the hundreds of "
+                        "ToxCast tasks from suppressing the small quantum circuits' encoding.")
+    p.add_argument('--lr', type=float, default=1e-3, help='Base LR (encoder/head).')
+    p.add_argument('--q_lr', type=float, default=1e-2, help='LR for variational quantum-circuit params.')
     p.add_argument('--no_cache', action='store_true', help='Re-featurize instead of using the disk cache')
     p.add_argument('--out', type=str, default='results/benchmark_cv_results.csv')
     p.add_argument('--quick', action='store_true',
@@ -228,6 +234,21 @@ def main():
         block_slices.append((name, off, off + n))
         off += n
     block_names = [b[0] for b in block_slices]
+
+    # Optionally restrict to a single source block (e.g. Tox21). Slicing the label columns
+    # in-place keeps the per-graph row slices valid and lets every downstream step
+    # (pos_weight, loss, metrics, param-matching) operate on just that block.
+    if args.tasks.lower() != 'all':
+        sel = [b for b in block_slices if b[0].lower() == args.tasks.lower()]
+        if not sel:
+            raise SystemExit(f"--tasks '{args.tasks}' not among blocks {block_names}")
+        name, s, e = sel[0]
+        dataset.data.y = dataset.data.y[:, s:e]
+        num_tasks = e - s
+        block_slices = [(name, 0, num_tasks)]
+        block_names = [name]
+        print(f"Restricted to block '{name}': {num_tasks} tasks")
+
     primary_name, p_start, p_end = block_slices[0]
     print(f"Task blocks: {[(n, s, e) for n, s, e in block_slices]} | headline = {primary_name}")
 
@@ -268,7 +289,7 @@ def main():
                     # Same init seed across model types within a fold -> reproducible & comparable.
                     torch.manual_seed(1000 * fold + 7)
                     model = create_model(level, scale, args.layers, num_tasks, m_type)
-                    trainer = Trainer(model, device, pos_weight)
+                    trainer = Trainer(model, device, pos_weight, lr=args.lr, q_lr=args.q_lr)
 
                     # Early stop on the PRIMARY-block (e.g. Tox21) validation ROC -- a
                     # classification signal -- not the mixed BCE+contrastive+desc val loss.

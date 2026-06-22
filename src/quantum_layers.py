@@ -4,11 +4,16 @@ import torch
 import torch.nn as nn
 
 class QuantumLayer(nn.Module):
-    def __init__(self, n_qubits, n_layers=2, ansatz='strong'):
+    def __init__(self, n_qubits, n_layers=2, ansatz='strong', readout='z'):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.ansatz_type = ansatz
+        # readout='xyz' measures <X>,<Y>,<Z> per qubit (3*n_qubits features); 'z' keeps the
+        # legacy single <Z> per qubit (used by the older QuantumEnsemble). The richer readout
+        # exposes phase information and gives the head far more signal to learn from.
+        self.readout = readout
+        self.n_obs = (3 if readout == 'xyz' else 1) * n_qubits
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
@@ -48,6 +53,10 @@ class QuantumLayer(nn.Module):
                             qml.RY(weights[l, i, 0], wires=i)
                             qml.RZ(weights[l, i, 1], wires=i)
 
+            if readout == 'xyz':
+                return ([qml.expval(qml.PauliX(i)) for i in range(n_qubits)] +
+                        [qml.expval(qml.PauliY(i)) for i in range(n_qubits)] +
+                        [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)])
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
         self.qnode = circuit
