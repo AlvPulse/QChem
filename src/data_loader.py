@@ -266,8 +266,12 @@ class Tox21GraphDataset(InMemoryDataset):
         self.scaffolds = scaffolds
         return self.collate(data_list)
 
-def _compute_pos_weights(tr_ds, num_tasks):
-    """Per-task pos_weight = n_neg / n_pos over the training split, NaN-aware."""
+POS_WEIGHT_CAP = 20.0  # ceiling so a near-degenerate task can't dominate the gradient
+
+
+def _compute_pos_weights(tr_ds, num_tasks, cap=POS_WEIGHT_CAP):
+    """Per-task pos_weight = n_neg / n_pos over the training split, NaN-aware and clamped.
+    The clamp avoids huge weights (e.g. 100+ for very rare tasks) destabilizing training."""
     all_y_tr = np.vstack([d.y.numpy() for d in tr_ds]) # (N, num_tasks)
 
     pos_weights = []
@@ -278,7 +282,7 @@ def _compute_pos_weights(tr_ds, num_tasks):
             y_valid = y_task[valid_mask]
             n_pos = (y_valid == 1).sum()
             n_neg = (y_valid == 0).sum()
-            weight = n_neg / max(n_pos, 1)
+            weight = min(n_neg / max(n_pos, 1), cap)
         else:
             weight = 1.0
         pos_weights.append(weight)
@@ -366,6 +370,9 @@ def build_merged_dataframe(root_dir='.', datasets=('Tox21', 'ToxCast')):
         rows.append({'smiles': smi, 'label': label.tolist()})
 
     df = pd.DataFrame(rows)
+    # Record the per-dataset block structure so downstream code can slice the merged
+    # task axis into its source datasets (e.g. Tox21 vs ToxCast per-block metrics).
+    df.attrs['block_tasks'] = [(name, int(n)) for name, n in zip(datasets, task_counts)]
     print(f"Merged {datasets} -> {len(df)} unique molecules, {total_tasks} tasks "
           f"(blocks: {dict(zip(datasets, task_counts))})")
     return df, total_tasks
@@ -458,12 +465,22 @@ def _merged_scaffolds_in_order(root_dir, datasets):
     return scaffolds
 
 
+def _block_tasks_for(root_dir, datasets):
+    """Per-dataset task counts [(name, n), ...] without featurization (label maps only)."""
+    blocks = []
+    for name in datasets:
+        _, n = _load_moleculenet_labels(name, root_dir)
+        blocks.append((name, int(n)))
+    return blocks
+
+
 def get_or_build_merged_dataset(root_dir='.', datasets=('Tox21', 'ToxCast'), cache_path=None):
     """
     Build the featurized merged dataset once and cache it to disk; subsequent calls
     load the cache instead of re-running 3D conformer embedding for ~10k molecules.
     The dataset object carries `.scaffolds` (one Murcko scaffold per graph, in order)
-    for scaffold-grouped cross-validation.
+    for scaffold-grouped cross-validation and `.block_tasks` ([(dataset_name, n_tasks), ...]
+    in task-column order) for per-source-dataset metric reporting.
     Returns: (dataset, num_tasks).
     """
     if cache_path is None:
@@ -473,25 +490,31 @@ def get_or_build_merged_dataset(root_dir='.', datasets=('Tox21', 'ToxCast'), cac
         payload = torch.load(cache_path, weights_only=False)
         ds = CachedGraphDataset(payload['data'], payload['slices'])
         scaffolds = payload.get('scaffolds')
-        if scaffolds is None or len(scaffolds) != len(ds):
+        block_tasks = payload.get('block_tasks')
+        if scaffolds is None or len(scaffolds) != len(ds) or block_tasks is None:
             # Upgrade an older cache in place (cheap: no re-featurization).
             scaffolds = _merged_scaffolds_in_order(root_dir, datasets)
+            block_tasks = _block_tasks_for(root_dir, datasets)
             if len(scaffolds) == len(ds):
                 payload['scaffolds'] = scaffolds
+                payload['block_tasks'] = block_tasks
                 torch.save(payload, cache_path)
             else:
                 print(f"WARNING: recovered {len(scaffolds)} scaffolds for {len(ds)} graphs; "
                       f"scaffold CV unavailable, falling back to per-graph buckets.")
                 scaffolds = [str(i) for i in range(len(ds))]
         ds.scaffolds = scaffolds
+        ds.block_tasks = block_tasks
         print(f"Loaded cached featurized dataset from {cache_path} ({len(ds)} graphs, {payload['num_tasks']} tasks)")
         return ds, int(payload['num_tasks'])
 
     df, num_tasks = build_merged_dataframe(root_dir, datasets=datasets)
+    block_tasks = df.attrs.get('block_tasks', [(d, None) for d in datasets])
     ds = Tox21GraphDataset('.', df)
+    ds.block_tasks = block_tasks
     os.makedirs(os.path.dirname(cache_path) or '.', exist_ok=True)
     torch.save({'data': ds.data, 'slices': ds.slices, 'num_tasks': num_tasks,
-                'scaffolds': ds.scaffolds}, cache_path)
+                'scaffolds': ds.scaffolds, 'block_tasks': block_tasks}, cache_path)
     print(f"Cached featurized dataset to {cache_path} ({len(ds)} graphs)")
     return ds, int(num_tasks)
 

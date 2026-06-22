@@ -1,11 +1,12 @@
 import os
+import copy
 import argparse
 import functools
 import torch
 import pandas as pd
 import numpy as np
 from sklearn.model_selection import GroupKFold
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss
 from scipy.stats import wilcoxon
 from torch_geometric.loader import DataLoader
 from src.train import Trainer
@@ -82,6 +83,38 @@ def per_task_auc(y_true, y_prob):
     return aucs
 
 
+def per_task_scores(y_true, y_prob):
+    """Per-task (ROC-AUC, AUPRC, Brier) over pooled predictions; NaN where not computable."""
+    nt = y_true.shape[1]
+    roc = np.full(nt, np.nan); pr = np.full(nt, np.nan); bri = np.full(nt, np.nan)
+    for t in range(nt):
+        valid = ~np.isnan(y_true[:, t])
+        yt, yp = y_true[valid, t], y_prob[valid, t]
+        if len(np.unique(yt)) > 1:
+            try:
+                roc[t] = roc_auc_score(yt, yp)
+                pr[t] = average_precision_score(yt, yp)
+                bri[t] = brier_score_loss(yt, yp)
+            except ValueError:
+                pass
+    return roc, pr, bri
+
+
+def block_metrics(y_true, y_prob, block_slices):
+    """Mean ROC/PR/Brier within each source-dataset block (e.g. Tox21 vs ToxCast),
+    instead of one diluted macro over all merged tasks. Returns {name: {...}}."""
+    out = {}
+    for name, s, e in block_slices:
+        roc, pr, bri = per_task_scores(y_true[:, s:e], y_prob[:, s:e])
+        out[name] = {
+            'roc': float(np.nanmean(roc)) if np.any(~np.isnan(roc)) else float('nan'),
+            'pr': float(np.nanmean(pr)) if np.any(~np.isnan(pr)) else float('nan'),
+            'brier': float(np.nanmean(bri)) if np.any(~np.isnan(bri)) else float('nan'),
+            'n': int(np.sum(~np.isnan(roc))),
+        }
+    return out
+
+
 def paired_task_test(auc_a, auc_b):
     """Paired Wilcoxon across tasks (high power: hundreds of paired tasks, unlike the
     n=5 fold-level test whose minimum achievable two-sided p is 0.0625). Returns
@@ -128,14 +161,15 @@ def bootstrap_metrics(y_true, y_prob, n_resamples=500, n_tasks_sample=20, seed=0
            (np.percentile(pr_aucs, 2.5), np.percentile(pr_aucs, 97.5))
 
 
-def compute_pos_weight(tr_ds, num_tasks, device):
+def compute_pos_weight(tr_ds, num_tasks, device, cap=20.0):
+    """Per-task pos_weight = n_neg/n_pos, clamped so a near-degenerate task can't dominate."""
     all_labels = torch.cat([data.y for data in tr_ds], dim=0)
     pos_weight = []
     for t in range(num_tasks):
         valid = ~torch.isnan(all_labels[:, t])
         pos = all_labels[valid, t].sum().item()
         neg = valid.sum().item() - pos
-        pos_weight.append(neg / (pos + 1e-5))
+        pos_weight.append(min(neg / (pos + 1e-5), cap))
     return torch.tensor(pos_weight, dtype=torch.float32).to(device)
 
 
@@ -185,6 +219,18 @@ def main():
     print(f"Scaffold CV: {len(dataset)} molecules across {len(uniq_scaffolds)} scaffolds, "
           f"{args.folds} folds")
 
+    # Source-dataset blocks (e.g. Tox21=12, ToxCast=617). We report metrics per block
+    # instead of one diluted macro over all merged tasks; the FIRST block is the headline.
+    blocks_raw = getattr(dataset, 'block_tasks', None) or [('all', num_tasks)]
+    block_slices, off = [], 0
+    for name, n in blocks_raw:
+        n = int(n) if n else num_tasks
+        block_slices.append((name, off, off + n))
+        off += n
+    block_names = [b[0] for b in block_slices]
+    primary_name, p_start, p_end = block_slices[0]
+    print(f"Task blocks: {[(n, s, e) for n, s, e in block_slices]} | headline = {primary_name}")
+
     all_results = []
     # quantum=structured (headline), scrambled=inductive-bias control,
     # separable=entanglement control, classical=context baseline.
@@ -193,9 +239,9 @@ def main():
     for level in args.levels:
         for scale in args.qubits:
             print(f"\n--- Level {level} (Qubits: {scale}) ---")
-            fold_rocs = {m: [] for m in model_types}
-            fold_prs = {m: [] for m in model_types}
-            fold_briers = {m: [] for m in model_types}
+            # fold_block[m][block][metric] = list over folds
+            fold_block = {m: {b: {'roc': [], 'pr': [], 'brier': []} for b in block_names}
+                          for m in model_types}
             pooled_probs = {m: [] for m in model_types}
             pooled_trues = {m: [] for m in model_types}
             indices = np.arange(len(dataset))
@@ -224,78 +270,95 @@ def main():
                     model = create_model(level, scale, args.layers, num_tasks, m_type)
                     trainer = Trainer(model, device, pos_weight)
 
-                    best_val_loss, no_improve = float('inf'), 0
+                    # Early stop on the PRIMARY-block (e.g. Tox21) validation ROC -- a
+                    # classification signal -- not the mixed BCE+contrastive+desc val loss.
+                    # Snapshot the best weights and restore them before test evaluation.
+                    best_val_roc, no_improve = -1.0, 0
+                    best_state = copy.deepcopy(model.state_dict())
                     for ep in range(args.epochs):
                         trainer.train_epoch(tr_loader)
                         va_mets = trainer.evaluate(va_loader)
                         trainer.scheduler.step(va_mets['loss'])
-                        if va_mets['loss'] < best_val_loss:
-                            best_val_loss, no_improve = va_mets['loss'], 0
+                        v_roc = np.nanmean(per_task_auc(va_mets['y_true'][:, p_start:p_end],
+                                                        va_mets['y_prob'][:, p_start:p_end]))
+                        if np.isnan(v_roc):
+                            v_roc = 0.0
+                        if v_roc > best_val_roc + 1e-4:
+                            best_val_roc, no_improve = v_roc, 0
+                            best_state = copy.deepcopy(model.state_dict())
                         else:
                             no_improve += 1
                             if no_improve >= args.patience:
                                 break
 
+                    model.load_state_dict(best_state)
                     te_mets = trainer.evaluate(te_loader)
-                    fold_rocs[m_type].append(te_mets['roc_auc'])
-                    fold_prs[m_type].append(te_mets['pr_auc'])
-                    fold_briers[m_type].append(te_mets['brier'])
+                    bm = block_metrics(te_mets['y_true'], te_mets['y_prob'], block_slices)
+                    for b in block_names:
+                        fold_block[m_type][b]['roc'].append(bm[b]['roc'])
+                        fold_block[m_type][b]['pr'].append(bm[b]['pr'])
+                        fold_block[m_type][b]['brier'].append(bm[b]['brier'])
                     pooled_probs[m_type].append(te_mets['y_prob'])
                     pooled_trues[m_type].append(te_mets['y_true'])
-                    print(f"  fold {fold+1}/{args.folds} {m_type:10s} "
-                          f"test macro-ROC {te_mets['roc_auc']:.4f} PR {te_mets['pr_auc']:.4f} "
-                          f"Brier {te_mets['brier']:.4f} (stopped ep {ep+1})")
+                    block_str = " | ".join(f"{b} ROC {bm[b]['roc']:.4f}" for b in block_names)
+                    print(f"  fold {fold+1}/{args.folds} {m_type:10s} {block_str} "
+                          f"(ep {ep+1}, bestVal {primary_name} ROC {best_val_roc:.4f})")
 
             for m in model_types:
                 pooled_probs[m] = np.vstack(pooled_probs[m])
                 pooled_trues[m] = np.vstack(pooled_trues[m])
 
-            # --- Significance ---
-            # The HEADLINE test is structured (quantum) vs scrambled: same gates, params,
-            # depth and entanglement, differing only in the chemistry->operator mapping. A
-            # gain here is attributable to the inductive bias itself, not to capacity.
-            # separable isolates entanglement; classical is a context baseline.
+            # --- Significance (per block) ---
+            # HEADLINE: structured (quantum) vs scrambled on the primary block -- same gates,
+            # params, depth, entanglement; differs only in the chemistry->operator mapping, so
+            # a gain isolates the inductive bias. separable isolates entanglement; classical
+            # is context. Reported per source-dataset block (Tox21 is the learnable headline).
             comparisons = ['scrambled', 'separable', 'classical']
             n_comp = len(comparisons)
 
-            # Fold-level Wilcoxon (low power: with n=5 folds the smallest possible
-            # two-sided p is 0.0625, so it can essentially never reach 0.05). Reference only.
-            def fold_p(a, b):
+            def fold_p(a, b):  # fold-level Wilcoxon (low power; reference only)
                 try:
                     return min(1.0, wilcoxon(a, b).pvalue * n_comp)
                 except ValueError:
                     return 1.0
 
-            # Per-task paired Wilcoxon over pooled CV predictions (hundreds of paired
-            # tasks -> properly powered, directly tests "is structured better per task").
-            auc = {m: per_task_auc(pooled_trues[m], pooled_probs[m]) for m in model_types}
-            p_task, d_task, p_fold = {}, {}, {}
-            for c in comparisons:
-                p, d, n = paired_task_test(auc['quantum'], auc[c])
-                p_task[c] = min(1.0, p * n_comp)   # Bonferroni over the 3 comparisons
-                d_task[c] = d
-                p_fold[c] = fold_p(fold_rocs['quantum'], fold_rocs[c])
-                tag = {'scrambled': 'Scrambled  (BIAS)', 'separable': 'Separable  (ENT) ',
-                       'classical': 'Classical  (CTX) '}[c]
-                print(f"  Structured vs {tag}: per-task p={p_task[c]:.4g} "
-                      f"(median dAUC {d_task[c]:+.4f}, {n} tasks) | fold p={p_fold[c]:.4g}")
+            # Per-task paired Wilcoxon over pooled CV predictions, computed within each block.
+            sig = {}  # sig[block][comparison] = (p_task, d_task, p_fold, n)
+            for name, s, e in block_slices:
+                auc_b = {m: per_task_auc(pooled_trues[m][:, s:e], pooled_probs[m][:, s:e])
+                         for m in model_types}
+                sig[name] = {}
+                tag = {'scrambled': 'Scrambled(BIAS)', 'separable': 'Separable(ENT)',
+                       'classical': 'Classical(CTX)'}
+                hl = '>>' if name == primary_name else '  '
+                for c in comparisons:
+                    p, d, n = paired_task_test(auc_b['quantum'], auc_b[c])
+                    p = min(1.0, p * n_comp)  # Bonferroni over the 3 comparisons
+                    pf = fold_p(fold_block['quantum'][name]['roc'], fold_block[c][name]['roc'])
+                    sig[name][c] = (p, d, pf, n)
+                    print(f"  {hl} [{name}] Structured vs {tag[c]:16s} per-task p={p:.4g} "
+                          f"(median dAUC {d:+.4f}, {n} tasks) | fold p={pf:.4g}")
 
             for m in model_types:
-                ci_roc, ci_pr = bootstrap_metrics(pooled_trues[m], pooled_probs[m], n_resamples=args.bootstrap)
-                row = {
-                    'Level': level, 'Qubits': scale, 'Model': m,
-                    'ROC_AUC_CV_Mean': float(np.mean(fold_rocs[m])),
-                    'ROC_AUC_CV_Std': float(np.std(fold_rocs[m])),
-                    'PR_AUC_CV_Mean': float(np.mean(fold_prs[m])),
-                    'PR_AUC_CV_Std': float(np.std(fold_prs[m])),
-                    'Brier_CV_Mean': float(np.mean(fold_briers[m])),
-                    'Brier_CV_Std': float(np.std(fold_briers[m])),
-                    'ROC_CI_95': ci_roc, 'PR_CI_95': ci_pr,
-                }
-                for c in comparisons:
-                    row[f'p_task_vs_{c}'] = p_task[c] if m == 'quantum' else np.nan
-                    row[f'median_dAUC_vs_{c}'] = d_task[c] if m == 'quantum' else np.nan
-                    row[f'p_fold_vs_{c}'] = p_fold[c] if m == 'quantum' else np.nan
+                # Bootstrap CI on the primary (learnable) block.
+                ci_roc, ci_pr = bootstrap_metrics(pooled_trues[m][:, p_start:p_end],
+                                                  pooled_probs[m][:, p_start:p_end],
+                                                  n_resamples=args.bootstrap)
+                row = {'Level': level, 'Qubits': scale, 'Model': m,
+                       'PrimaryBlock': primary_name,
+                       f'ROC_{primary_name}_CI95': ci_roc, f'PR_{primary_name}_CI95': ci_pr}
+                for b in block_names:
+                    row[f'ROC_{b}_Mean'] = float(np.nanmean(fold_block[m][b]['roc']))
+                    row[f'ROC_{b}_Std'] = float(np.nanstd(fold_block[m][b]['roc']))
+                    row[f'PR_{b}_Mean'] = float(np.nanmean(fold_block[m][b]['pr']))
+                    row[f'Brier_{b}_Mean'] = float(np.nanmean(fold_block[m][b]['brier']))
+                if m == 'quantum':
+                    for b in block_names:
+                        for c in comparisons:
+                            p, d, pf, _ = sig[b][c]
+                            row[f'p_task_{b}_vs_{c}'] = p
+                            row[f'median_dAUC_{b}_vs_{c}'] = d
+                            row[f'p_fold_{b}_vs_{c}'] = pf
                 all_results.append(row)
 
             # Incremental save so a long run is never lost.
