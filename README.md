@@ -34,10 +34,13 @@ The project is structured to demonstrate an incremental buildup:
 
 ### Step 7: Deep Quantum Inductive Bias (7 Levels of Novelty)
 *   **Files:** `src/quantum_levels.py`, `run_experiment.py`
-*   **Description:** To demonstrate quantum advantage over classical networks of the *same parameter count*, we define seven structural levels. Each level has three variants that share the classical `SemanticFeatureExtractor` encoder and differ only in the head:
-    *   `*_quantum` — full PennyLane variational circuit (with entanglement).
-    *   `*_separable` — **ablation**: identical circuit with **all entangling gates removed**, isolating whether entanglement (not just extra parameters) drives any gain.
-    *   `*_classical` — a parameter-matched classical MLP (inner width auto-tuned in `run_benchmark.py` to match the quantum parameter count).
+*   **Description:** The goal is **not** "quantum beats classical" but to isolate the value of the *quantum inductive bias* — the deliberate mapping of chemical features onto specific operator geometry. We define seven structural levels. Each level's quantum head can be instantiated in three circuit variants that share the same gate set, parameter count and depth, plus a parameter-matched classical baseline. All share the classical `SemanticFeatureExtractor` encoder:
+    *   `*_quantum` (**structured**) — the proposed circuit: chemistry drives specific operator families/geometry, with entanglement.
+    *   **scrambled** (control, headline comparison) — the *same* circuit, gates, parameters, depth and entanglement, but the chemistry→operator correspondence is destroyed (each operator reads its input feature through a different fixed random permutation). A gain of *structured over scrambled* is attributable to the **inductive bias itself**, not to model capacity. Selected with `ansatz='scrambled'` (used by `run_benchmark.py`).
+    *   `*_separable` (control) — identical circuit with **all entangling gates removed**, isolating whether *entanglement* (not just added parameters) drives any gain.
+    *   `*_classical` — a parameter-matched classical MLP (inner width auto-tuned in `run_benchmark.py` to match the quantum parameter count); a **context baseline**, not the headline.
+
+    *(Note: Level 1 has no chemistry→operator-geometry mapping — it is a generic embedding + entangler — so its `scrambled` variant is structurally identical to `structured`; the control only has a lever from Level 2 onward.)*
 
     The levels:
     *   **Level 1 (Features -> Models):** "Three Circuits + Attention". Motif, Cycle, and Spectral features routed to independent circuits and aggregated by attention.
@@ -85,10 +88,15 @@ python run_experiment.py --model rf
 
 ## Full Benchmark Suite
 
-`run_benchmark.py` runs the rigorous comparison: stratified K-fold CV over the
-selected levels × {quantum, separable, classical} × qubit scales on the **merged
-Tox21 + ToxCast** dataset, with significance tests and bootstrap 95% CIs. Results
-are written incrementally to `results/benchmark_cv_results.csv`.
+`run_benchmark.py` runs the rigorous comparison: **scaffold-grouped** K-fold CV over the
+selected levels × {structured (quantum), scrambled, separable, classical} × qubit scales
+on the **merged Tox21 + ToxCast** dataset, with significance tests and bootstrap 95% CIs.
+Results are written incrementally to `results/benchmark_cv_results.csv`.
+
+**Why scaffold CV?** Each Bemis–Murcko scaffold lands entirely in one fold (via
+`GroupKFold`), so the held-out fold is structurally novel — a deployment-relevant
+out-of-distribution split rather than the over-optimistic random split. Validation is
+carved off the *training* scaffolds so early stopping isn't tuned on leaked structures.
 
 ```bash
 python run_benchmark.py                 # full run (levels 1-7, qubits {4,6}, 5 folds)
@@ -99,11 +107,18 @@ python run_benchmark.py --levels 3 5 --qubits 4 --folds 5 --epochs 100
 Useful flags: `--levels`, `--qubits`, `--folds`, `--epochs`, `--patience`,
 `--batch_size`, `--bootstrap`, `--datasets`, `--no_cache`, `--out`.
 
-**Significance reporting.** Two tests are reported per configuration:
-*   **Per-task paired Wilcoxon** (primary): pairs quantum vs classical/separable ROC-AUC across the hundreds of tasks (computed on identical pooled CV predictions). This is well powered.
+**Headline comparison.** The primary result is **structured vs scrambled** — same gates,
+parameters, depth and entanglement, differing *only* in the chemistry→operator mapping.
+A gain there isolates the inductive bias. `separable` isolates entanglement; `classical`
+is context.
+
+**Significance reporting.** Two tests are reported per comparison:
+*   **Per-task paired Wilcoxon** (primary): pairs structured vs {scrambled, separable, classical} ROC-AUC across the hundreds of tasks (computed on identical pooled CV predictions). This is well powered.
 *   **Fold-level Wilcoxon** (reference only): with 5 folds the smallest achievable two-sided p-value is 0.0625, so it can essentially *never* reach 0.05 — don't read significance into it.
 
-Both are Bonferroni-corrected (×2) for the two comparisons. The CSV also reports `median_dAUC_vs_{classical,separable}` (median per-task AUC gap).
+Both are Bonferroni-corrected (×3) for the three comparisons. Per configuration the CSV
+reports CV mean/std for **ROC-AUC, AUPRC and Brier**, bootstrap 95% CIs, and per comparison
+`p_task_vs_{scrambled,separable,classical}`, `median_dAUC_vs_*`, and `p_fold_vs_*`.
 
 ### Performance notes
 The earlier version was dominated by two costs, both fixed:

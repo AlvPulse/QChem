@@ -4,7 +4,7 @@ import functools
 import torch
 import pandas as pd
 import numpy as np
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import GroupKFold
 from sklearn.metrics import roc_auc_score, average_precision_score
 from scipy.stats import wilcoxon
 from torch_geometric.loader import DataLoader
@@ -49,11 +49,18 @@ def match_classical_inner_dim(target_params, level, num_tasks, in_dim=64):
     return best_inner
 
 
+# Quantum model variants that share gates/parameters/depth and differ only in the
+# chemistry->operator-geometry mapping:
+#   quantum   = structured  (the proposed inductive bias)
+#   scrambled = same circuit, mapping destroyed (isolates the inductive bias itself)
+#   separable = same single-qubit ops, entanglement removed (isolates entanglement)
+_ANSATZ = {'quantum': 'strong', 'scrambled': 'scrambled', 'separable': 'separable'}
+
+
 def create_model(level, scale, layers, num_tasks, m_type):
-    if m_type == 'quantum':
-        return _QUANTUM[level](hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='strong')
-    if m_type == 'separable':
-        return _QUANTUM[level](hidden_dim=64, n_qubits=scale, q_layers=layers, out_dim=num_tasks, ansatz='separable')
+    if m_type in _ANSATZ:
+        return _QUANTUM[level](hidden_dim=64, n_qubits=scale, q_layers=layers,
+                               out_dim=num_tasks, ansatz=_ANSATZ[m_type])
     if m_type == 'classical':
         q_params = _quantum_param_count(level, scale, layers, num_tasks)
         inner = match_classical_inner_dim(q_params, level, num_tasks, 64)
@@ -133,7 +140,10 @@ def compute_pos_weight(tr_ds, num_tasks, device):
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Quantum vs separable vs parameter-matched classical CV benchmark")
+    p = argparse.ArgumentParser(
+        description="Quantum inductive-bias benchmark: structured vs scrambled (bias control) "
+                    "vs separable (entanglement control) vs parameter-matched classical, "
+                    "on scaffold-grouped CV")
     p.add_argument('--levels', type=int, nargs='+', default=[1, 2, 3, 4, 5, 6, 7])
     p.add_argument('--qubits', type=int, nargs='+', default=[4, 6])
     p.add_argument('--folds', type=int, default=5)
@@ -163,28 +173,44 @@ def main():
     dataset, num_tasks = get_or_build_merged_dataset(root_dir='.', datasets=tuple(args.datasets), cache_path=cache_path)
     num_tasks = int(num_tasks)
 
-    # Stratify by the first task (NaN -> 0 for stratification purposes only)
-    y_stratify = [(dataset[i].y[0, 0].item() if not np.isnan(dataset[i].y[0, 0].item()) else 0.0)
-                  for i in range(len(dataset))]
-    skf = StratifiedKFold(n_splits=args.folds, shuffle=True, random_state=42)
+    # Scaffold-grouped CV: each Bemis-Murcko scaffold lands entirely in one fold, so
+    # the test fold is structurally novel (a deployment-relevant OOD split) rather than
+    # the over-optimistic random split. GroupKFold guarantees groups never cross folds.
+    scaffolds = list(getattr(dataset, 'scaffolds', []))
+    if len(scaffolds) != len(dataset):
+        raise RuntimeError("dataset.scaffolds missing/misaligned; cannot run scaffold CV")
+    uniq_scaffolds = {s: i for i, s in enumerate(sorted(set(scaffolds)))}
+    groups = np.array([uniq_scaffolds[s] for s in scaffolds])
+    gkf = GroupKFold(n_splits=args.folds)
+    print(f"Scaffold CV: {len(dataset)} molecules across {len(uniq_scaffolds)} scaffolds, "
+          f"{args.folds} folds")
 
     all_results = []
-    model_types = ['classical', 'separable', 'quantum']
+    # quantum=structured (headline), scrambled=inductive-bias control,
+    # separable=entanglement control, classical=context baseline.
+    model_types = ['classical', 'separable', 'scrambled', 'quantum']
 
     for level in args.levels:
         for scale in args.qubits:
             print(f"\n--- Level {level} (Qubits: {scale}) ---")
             fold_rocs = {m: [] for m in model_types}
+            fold_prs = {m: [] for m in model_types}
+            fold_briers = {m: [] for m in model_types}
             pooled_probs = {m: [] for m in model_types}
             pooled_trues = {m: [] for m in model_types}
             indices = np.arange(len(dataset))
 
-            for fold, (train_idx, test_idx) in enumerate(skf.split(indices, y_stratify)):
+            for fold, (train_idx, test_idx) in enumerate(gkf.split(indices, groups=groups)):
+                # Carve validation off the training scaffolds (kept scaffold-disjoint from
+                # train so early stopping isn't tuned on leaked structures).
                 rng = np.random.default_rng(42 + fold)
-                val_size = int(0.1 * len(train_idx))
-                val_choice = rng.choice(len(train_idx), val_size, replace=False)
-                val_idx = train_idx[val_choice]
-                train_idx = np.delete(train_idx, val_choice)
+                tr_groups = np.unique(groups[train_idx])
+                rng.shuffle(tr_groups)
+                n_val_groups = max(1, int(0.1 * len(tr_groups)))
+                val_group_set = set(tr_groups[:n_val_groups].tolist())
+                is_val = np.array([g in val_group_set for g in groups[train_idx]])
+                val_idx = train_idx[is_val]
+                train_idx = train_idx[~is_val]
 
                 tr_ds, va_ds, te_ds = dataset[train_idx], dataset[val_idx], dataset[test_idx]
                 tr_loader = DataLoader(tr_ds, batch_size=args.batch_size, shuffle=True)
@@ -212,53 +238,65 @@ def main():
 
                     te_mets = trainer.evaluate(te_loader)
                     fold_rocs[m_type].append(te_mets['roc_auc'])
+                    fold_prs[m_type].append(te_mets['pr_auc'])
+                    fold_briers[m_type].append(te_mets['brier'])
                     pooled_probs[m_type].append(te_mets['y_prob'])
                     pooled_trues[m_type].append(te_mets['y_true'])
                     print(f"  fold {fold+1}/{args.folds} {m_type:10s} "
-                          f"test macro-ROC {te_mets['roc_auc']:.4f} (stopped ep {ep+1})")
+                          f"test macro-ROC {te_mets['roc_auc']:.4f} PR {te_mets['pr_auc']:.4f} "
+                          f"Brier {te_mets['brier']:.4f} (stopped ep {ep+1})")
 
             for m in model_types:
                 pooled_probs[m] = np.vstack(pooled_probs[m])
                 pooled_trues[m] = np.vstack(pooled_trues[m])
 
             # --- Significance ---
+            # The HEADLINE test is structured (quantum) vs scrambled: same gates, params,
+            # depth and entanglement, differing only in the chemistry->operator mapping. A
+            # gain here is attributable to the inductive bias itself, not to capacity.
+            # separable isolates entanglement; classical is a context baseline.
+            comparisons = ['scrambled', 'separable', 'classical']
+            n_comp = len(comparisons)
+
             # Fold-level Wilcoxon (low power: with n=5 folds the smallest possible
-            # two-sided p is 0.0625, so it can essentially never reach 0.05). Kept for reference.
+            # two-sided p is 0.0625, so it can essentially never reach 0.05). Reference only.
             def fold_p(a, b):
                 try:
-                    return min(1.0, wilcoxon(a, b).pvalue * 2)
+                    return min(1.0, wilcoxon(a, b).pvalue * n_comp)
                 except ValueError:
                     return 1.0
-            p_fold_classical = fold_p(fold_rocs['quantum'], fold_rocs['classical'])
-            p_fold_separable = fold_p(fold_rocs['quantum'], fold_rocs['separable'])
 
             # Per-task paired Wilcoxon over pooled CV predictions (hundreds of paired
-            # tasks -> properly powered, and directly tests "is quantum better per task").
+            # tasks -> properly powered, directly tests "is structured better per task").
             auc = {m: per_task_auc(pooled_trues[m], pooled_probs[m]) for m in model_types}
-            p_task_classical, d_classical, n_c = paired_task_test(auc['quantum'], auc['classical'])
-            p_task_separable, d_separable, n_s = paired_task_test(auc['quantum'], auc['separable'])
-            p_task_classical = min(1.0, p_task_classical * 2)  # Bonferroni (2 comparisons)
-            p_task_separable = min(1.0, p_task_separable * 2)
-
-            print(f"  Q vs Classical: per-task p={p_task_classical:.4g} "
-                  f"(median dAUC {d_classical:+.4f}, {n_c} tasks) | fold p={p_fold_classical:.4g}")
-            print(f"  Q vs Separable: per-task p={p_task_separable:.4g} "
-                  f"(median dAUC {d_separable:+.4f}, {n_s} tasks) | fold p={p_fold_separable:.4g}")
+            p_task, d_task, p_fold = {}, {}, {}
+            for c in comparisons:
+                p, d, n = paired_task_test(auc['quantum'], auc[c])
+                p_task[c] = min(1.0, p * n_comp)   # Bonferroni over the 3 comparisons
+                d_task[c] = d
+                p_fold[c] = fold_p(fold_rocs['quantum'], fold_rocs[c])
+                tag = {'scrambled': 'Scrambled  (BIAS)', 'separable': 'Separable  (ENT) ',
+                       'classical': 'Classical  (CTX) '}[c]
+                print(f"  Structured vs {tag}: per-task p={p_task[c]:.4g} "
+                      f"(median dAUC {d_task[c]:+.4f}, {n} tasks) | fold p={p_fold[c]:.4g}")
 
             for m in model_types:
                 ci_roc, ci_pr = bootstrap_metrics(pooled_trues[m], pooled_probs[m], n_resamples=args.bootstrap)
-                all_results.append({
+                row = {
                     'Level': level, 'Qubits': scale, 'Model': m,
                     'ROC_AUC_CV_Mean': float(np.mean(fold_rocs[m])),
                     'ROC_AUC_CV_Std': float(np.std(fold_rocs[m])),
+                    'PR_AUC_CV_Mean': float(np.mean(fold_prs[m])),
+                    'PR_AUC_CV_Std': float(np.std(fold_prs[m])),
+                    'Brier_CV_Mean': float(np.mean(fold_briers[m])),
+                    'Brier_CV_Std': float(np.std(fold_briers[m])),
                     'ROC_CI_95': ci_roc, 'PR_CI_95': ci_pr,
-                    'p_task_vs_classical': p_task_classical if m == 'quantum' else np.nan,
-                    'p_task_vs_separable': p_task_separable if m == 'quantum' else np.nan,
-                    'median_dAUC_vs_classical': d_classical if m == 'quantum' else np.nan,
-                    'median_dAUC_vs_separable': d_separable if m == 'quantum' else np.nan,
-                    'p_fold_vs_classical': p_fold_classical if m == 'quantum' else np.nan,
-                    'p_fold_vs_separable': p_fold_separable if m == 'quantum' else np.nan,
-                })
+                }
+                for c in comparisons:
+                    row[f'p_task_vs_{c}'] = p_task[c] if m == 'quantum' else np.nan
+                    row[f'median_dAUC_vs_{c}'] = d_task[c] if m == 'quantum' else np.nan
+                    row[f'p_fold_vs_{c}'] = p_fold[c] if m == 'quantum' else np.nan
+                all_results.append(row)
 
             # Incremental save so a long run is never lost.
             os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)

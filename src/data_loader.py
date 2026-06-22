@@ -204,14 +204,27 @@ def mol_to_pyg(smiles, y):
 
     return Data(x=x, x_cont=x_cont, edge_index=edge_index, edge_attr=edge_attr, edge_attr_cont=edge_attr_cont, y=y, y_desc=y_desc)
 
+def murcko_scaffold(smiles, mol=None):
+    """Bemis-Murcko scaffold SMILES for a molecule (acyclic -> '' bucket).
+    Pass an already-parsed `mol` to avoid re-parsing."""
+    if mol is None:
+        mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return ''
+    try:
+        scaf = MurckoScaffold.GetScaffoldForMol(mol)
+        return Chem.MolToSmiles(scaf) if scaf else ''
+    except Exception:
+        return ''
+
+
 def scaffold_split(df, seed=SEED):
     # Create scaffold buckets
     scaffolds = defaultdict(list)
     for idx, smiles in enumerate(df['smiles']):
         mol = Chem.MolFromSmiles(smiles)
         if mol:
-            scaf = MurckoScaffold.GetScaffoldForMol(mol)
-            scaf_smiles = Chem.MolToSmiles(scaf) if scaf else ''
+            scaf_smiles = murcko_scaffold(smiles, mol)
             scaffolds[scaf_smiles].append(idx)
 
     # Sort buckets by size
@@ -243,10 +256,14 @@ class Tox21GraphDataset(InMemoryDataset):
 
     def process_df(self):
         data_list = []
+        scaffolds = []
         for _, row in self.df.iterrows():
             graph = mol_to_pyg(row['smiles'], row['label'])
             if graph:
                 data_list.append(graph)
+                # Aligned with dataset order; used for scaffold-grouped CV.
+                scaffolds.append(murcko_scaffold(row['smiles']))
+        self.scaffolds = scaffolds
         return self.collate(data_list)
 
 def _compute_pos_weights(tr_ds, num_tasks):
@@ -422,10 +439,31 @@ class CachedGraphDataset(Tox21GraphDataset):
         self.data, self.slices = data, slices
 
 
+def _merged_scaffolds_in_order(root_dir, datasets):
+    """Recover the Murcko scaffold of each featurized graph, in dataset order, without
+    re-running the (slow) 3D-conformer featurization. The merged dataframe is
+    deterministic and `mol_to_pyg` drops a molecule iff RDKit fails to parse or
+    kekulize it, so replicating just that cheap test reproduces the dataset order."""
+    df, _ = build_merged_dataframe(root_dir, datasets=datasets)
+    scaffolds = []
+    for smi in df['smiles']:
+        m = Chem.MolFromSmiles(smi)
+        if m is None:
+            continue
+        try:
+            Chem.Kekulize(m, clearAromaticFlags=False)
+        except Exception:
+            continue
+        scaffolds.append(murcko_scaffold(smi))
+    return scaffolds
+
+
 def get_or_build_merged_dataset(root_dir='.', datasets=('Tox21', 'ToxCast'), cache_path=None):
     """
     Build the featurized merged dataset once and cache it to disk; subsequent calls
     load the cache instead of re-running 3D conformer embedding for ~10k molecules.
+    The dataset object carries `.scaffolds` (one Murcko scaffold per graph, in order)
+    for scaffold-grouped cross-validation.
     Returns: (dataset, num_tasks).
     """
     if cache_path is None:
@@ -434,13 +472,26 @@ def get_or_build_merged_dataset(root_dir='.', datasets=('Tox21', 'ToxCast'), cac
     if os.path.exists(cache_path):
         payload = torch.load(cache_path, weights_only=False)
         ds = CachedGraphDataset(payload['data'], payload['slices'])
+        scaffolds = payload.get('scaffolds')
+        if scaffolds is None or len(scaffolds) != len(ds):
+            # Upgrade an older cache in place (cheap: no re-featurization).
+            scaffolds = _merged_scaffolds_in_order(root_dir, datasets)
+            if len(scaffolds) == len(ds):
+                payload['scaffolds'] = scaffolds
+                torch.save(payload, cache_path)
+            else:
+                print(f"WARNING: recovered {len(scaffolds)} scaffolds for {len(ds)} graphs; "
+                      f"scaffold CV unavailable, falling back to per-graph buckets.")
+                scaffolds = [str(i) for i in range(len(ds))]
+        ds.scaffolds = scaffolds
         print(f"Loaded cached featurized dataset from {cache_path} ({len(ds)} graphs, {payload['num_tasks']} tasks)")
         return ds, int(payload['num_tasks'])
 
     df, num_tasks = build_merged_dataframe(root_dir, datasets=datasets)
     ds = Tox21GraphDataset('.', df)
     os.makedirs(os.path.dirname(cache_path) or '.', exist_ok=True)
-    torch.save({'data': ds.data, 'slices': ds.slices, 'num_tasks': num_tasks}, cache_path)
+    torch.save({'data': ds.data, 'slices': ds.slices, 'num_tasks': num_tasks,
+                'scaffolds': ds.scaffolds}, cache_path)
     print(f"Cached featurized dataset to {cache_path} ({len(ds)} graphs)")
     return ds, int(num_tasks)
 

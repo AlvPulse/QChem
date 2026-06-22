@@ -6,6 +6,37 @@ import pennylane as qml
 from .features.semantic_extractor import SemanticFeatureExtractor
 from .quantum_layers import QuantumLayer
 
+
+def _perms(n_qubits, scrambled, n_sites, seed=20240617):
+    """Index permutations used to route input feature columns into gate arguments.
+
+    Returns `n_sites` lists of length `n_qubits`.
+
+    * Not scrambled -> every site is the identity, so feature column i drives the
+      gate(s) on wire i consistently (the structured chemistry->operator geometry).
+    * Scrambled -> each site gets a *different* fixed random permutation. Every gate,
+      weight and wire is untouched (same parameter count, depth and entanglement), but
+      the coherent "feature i <-> qubit i" correspondence is destroyed: the same physical
+      feature drives unrelated qubits at different points in the circuit. Because the
+      upstream learned projection emits a single vector, it cannot undo several
+      inconsistent permutations at once, so the inductive bias is genuinely removed
+      rather than re-absorbed by training.
+    """
+    ids = list(range(n_qubits))
+    if not scrambled or n_qubits < 2:
+        return [ids[:] for _ in range(n_sites)]
+    g = torch.Generator().manual_seed(seed)
+    out = []
+    while len(out) < n_sites:
+        p = torch.randperm(n_qubits, generator=g).tolist()
+        if p == ids:                      # never the identity (would preserve the mapping)
+            continue
+        if out and p == out[-1]:          # consecutive sites must differ
+            continue
+        out.append(p)
+    return out
+
+
 class Level1Classical(nn.Module):
     """
     Level 1 Classical: "Three MLPs + Attention"
@@ -174,6 +205,9 @@ class Level2QuantumLayer(nn.Module):
         # 'separable' is the no-entanglement ablation: keep the single-qubit
         # operator-family mapping but drop the spectral coupling gates.
         entangle = (ansatz != 'separable')
+        # 'scrambled' control: keep every gate but break the motif/cycle/spectral
+        # -> qubit alignment (each operator family reads a different permutation).
+        pr_m, pr_c, pe_s = _perms(n_qubits, ansatz == 'scrambled', 3)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
@@ -183,10 +217,10 @@ class Level2QuantumLayer(nn.Module):
             for l in range(n_layers):
                 for i in range(n_qubits):
                     # 1. Motifs -> R_y (Local rotations)
-                    qml.RY(m_inputs[:, i] * weights[l, i, 0], wires=i)
+                    qml.RY(m_inputs[:, pr_m[i]] * weights[l, i, 0], wires=i)
 
                     # 2. Cycles -> R_z (Phase accumulations)
-                    qml.RZ(c_inputs[:, i] * weights[l, i, 1], wires=i)
+                    qml.RZ(c_inputs[:, pr_c[i]] * weights[l, i, 1], wires=i)
 
                 # 3. Spectral -> Interaction Hamiltonians (Ising ZZ or XY coupling)
                 # We use the spectral features to scale the entanglement.
@@ -194,10 +228,10 @@ class Level2QuantumLayer(nn.Module):
                 if entangle:
                     for i in range(n_qubits - 1):
                         # Ising XX coupling controlled by spectral input + weight
-                        coupling_strength = s_inputs[:, i] * weights[l, i, 2]
+                        coupling_strength = s_inputs[:, pe_s[i]] * weights[l, i, 2]
                         qml.IsingXX(coupling_strength, wires=[i, i+1])
                     # Close the ring
-                    qml.IsingXX(s_inputs[:, -1] * weights[l, -1, 2], wires=[n_qubits-1, 0])
+                    qml.IsingXX(s_inputs[:, pe_s[n_qubits-1]] * weights[l, -1, 2], wires=[n_qubits-1, 0])
 
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
@@ -307,6 +341,11 @@ class Level3QuantumLayer(nn.Module):
         # 'separable' ablation: keep motif->phase modulation but drop the
         # spectral-driven entanglement geometry.
         entangle = (ansatz != 'separable')
+        # 'scrambled' control: the cross-modality coupling (motif modulating cycle
+        # phase) and the direct spectral->entanglement map are this level's inductive
+        # bias. Independent permutations at the RY site, the cycle-phase site, the
+        # motif-modulation site and the entanglement site destroy that alignment.
+        pr_m, pr_c, pm_m, pe_s = _perms(n_qubits, ansatz == 'scrambled', 4)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
@@ -316,11 +355,11 @@ class Level3QuantumLayer(nn.Module):
             for l in range(n_layers):
                 for i in range(n_qubits):
                     # Local Motif processing
-                    qml.RY(m_inputs[:, i] * weights[l, i, 0], wires=i)
+                    qml.RY(m_inputs[:, pr_m[i]] * weights[l, i, 0], wires=i)
 
                     # Motif modulates Phase Accumulation of Cycle! (Cross-modality interaction)
                     # This represents geometric dependency.
-                    phase = (c_inputs[:, i] * weights[l, i, 1]) + (alpha[i] * m_inputs[:, i])
+                    phase = (c_inputs[:, pr_c[i]] * weights[l, i, 1]) + (alpha[i] * m_inputs[:, pm_m[i]])
                     qml.RZ(phase, wires=i)
 
                 # Spectral dictates Entanglement Geometry directly!
@@ -329,8 +368,8 @@ class Level3QuantumLayer(nn.Module):
                         # Here s_inputs directly controls the strength of the XX coupling
                         # without an independent learned parameter (or with a global one).
                         # The chemistry (spectral mode) defines the interaction topology.
-                        qml.IsingXX(s_inputs[:, i], wires=[i, i+1])
-                    qml.IsingXX(s_inputs[:, -1], wires=[n_qubits-1, 0])
+                        qml.IsingXX(s_inputs[:, pe_s[i]], wires=[i, i+1])
+                    qml.IsingXX(s_inputs[:, pe_s[n_qubits-1]], wires=[n_qubits-1, 0])
 
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
@@ -426,6 +465,11 @@ class Level4QuantumLayer(nn.Module):
         # 'separable' ablation: keep chemical state prep but drop the
         # distance-modulated spatial entanglement.
         entangle = (ansatz != 'separable')
+        # 'scrambled' control: the inductive bias is that the distance between a
+        # specific qubit pair modulates *that pair's* coupling. Permuting the chemical
+        # state-prep and the distance->coupling routing (independently) breaks which
+        # distance governs which entangling gate.
+        pr_c, pe_d = _perms(n_qubits, ansatz == 'scrambled', 2)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
@@ -434,7 +478,7 @@ class Level4QuantumLayer(nn.Module):
             for l in range(n_layers):
                 # 1. State Preparation (Chemical features)
                 for i in range(n_qubits):
-                    qml.RY(chem_inputs[:, i] * weights[l, i, 0], wires=i)
+                    qml.RY(chem_inputs[:, pr_c[i]] * weights[l, i, 0], wires=i)
 
                 # 2. 3D Spatial Entanglement (Native Quantum Edge Processing)
                 # We map the pooled Euclidean distance directly into the phase of the entangling gate.
@@ -443,9 +487,9 @@ class Level4QuantumLayer(nn.Module):
                 if entangle:
                     for i in range(n_qubits - 1):
                         # Inversely scale entanglement by distance (closer = stronger)
-                        coupling = weights[l, i, 1] / (1.0 + dist_inputs[:, i])
+                        coupling = weights[l, i, 1] / (1.0 + dist_inputs[:, pe_d[i]])
                         qml.CRZ(coupling, wires=[i, i+1])
-                    qml.CRZ(weights[l, -1, 1] / (1.0 + dist_inputs[:, -1]), wires=[n_qubits-1, 0])
+                    qml.CRZ(weights[l, -1, 1] / (1.0 + dist_inputs[:, pe_d[n_qubits-1]]), wires=[n_qubits-1, 0])
 
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
@@ -525,6 +569,10 @@ class Level5QuantumLayer(nn.Module):
         # 'separable' ablation: keep electronic-structure rotations but drop the
         # XX/YY bonding entanglement.
         entangle = (ansatz != 'separable')
+        # 'scrambled' control: the bias is that the *same* atomic feature i drives
+        # both qubit i's electronic rotations and the bond i<->i+1 entanglement.
+        # Independent permutations per operator break that coherent atomic identity.
+        p_rz, p_ry, p_xx, p_yy = _perms(n_qubits, ansatz == 'scrambled', 4)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
@@ -533,13 +581,13 @@ class Level5QuantumLayer(nn.Module):
             for l in range(n_layers):
                 for i in range(n_qubits):
                     # Z-rotations reflect electronegativity / partial charges
-                    qml.RZ(chem_inputs[:, i] * weights[l, i, 0], wires=i)
-                    qml.RY(chem_inputs[:, i] * weights[l, i, 1], wires=i)
+                    qml.RZ(chem_inputs[:, p_rz[i]] * weights[l, i, 0], wires=i)
+                    qml.RY(chem_inputs[:, p_ry[i]] * weights[l, i, 1], wires=i)
                 if entangle:
                     for i in range(n_qubits - 1):
                         # XX/YY Entanglement reflecting bonding
-                        qml.IsingXX(chem_inputs[:, i] * weights[l, i, 2], wires=[i, i+1])
-                        qml.IsingYY(chem_inputs[:, i+1] * weights[l, i, 3], wires=[i, i+1])
+                        qml.IsingXX(chem_inputs[:, p_xx[i]] * weights[l, i, 2], wires=[i, i+1])
+                        qml.IsingYY(chem_inputs[:, p_yy[i+1]] * weights[l, i, 3], wires=[i, i+1])
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
         self.qnode = circuit
@@ -601,6 +649,11 @@ class Level6QuantumLayer(nn.Module):
         # 'separable' ablation: keep full single-qubit rotations but drop the
         # all-to-all spatial/electrostatic entanglement.
         entangle = (ansatz != 'separable')
+        # 'scrambled' control: the bias is the electrostatic product term
+        # chem_i * chem_j governing the i<->j coupling, coherent with the single-qubit
+        # rotations. Independent permutations on the rotation sites and on each factor
+        # of the product destroy that geometric correspondence.
+        p_rx, p_ry, p_rz, pc_i, pc_j = _perms(n_qubits, ansatz == 'scrambled', 5)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
@@ -608,14 +661,14 @@ class Level6QuantumLayer(nn.Module):
             # chem_inputs is (B, n_qubits): broadcast over the batch dim.
             for l in range(n_layers):
                 for i in range(n_qubits):
-                    qml.RX(chem_inputs[:, i] * weights[l, i, 0], wires=i)
-                    qml.RY(chem_inputs[:, i] * weights[l, i, 1], wires=i)
-                    qml.RZ(chem_inputs[:, i] * weights[l, i, 2], wires=i)
+                    qml.RX(chem_inputs[:, p_rx[i]] * weights[l, i, 0], wires=i)
+                    qml.RY(chem_inputs[:, p_ry[i]] * weights[l, i, 1], wires=i)
+                    qml.RZ(chem_inputs[:, p_rz[i]] * weights[l, i, 2], wires=i)
                 # All-to-all entanglement weighted by 3D spatial chem feature
                 if entangle:
                     for i in range(n_qubits):
                         for j in range(i + 1, n_qubits):
-                            coupling = chem_inputs[:, i] * chem_inputs[:, j] * weights[l, i, 3]
+                            coupling = chem_inputs[:, pc_i[i]] * chem_inputs[:, pc_j[j]] * weights[l, i, 3]
                             qml.CRZ(coupling, wires=[i, j])
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
@@ -678,6 +731,11 @@ class Level7QuantumLayer(nn.Module):
         # 'separable' ablation: keep U3 pharmacophore rotations but drop the
         # controlled pharmacophore-dependency entanglement.
         entangle = (ansatz != 'separable')
+        # 'scrambled' control: the bias is that a reactivity site's feature drives both
+        # its U3 rotation and the controlled pharmacophore dependency to its neighbour.
+        # Independent permutations across the three U3 angles and the CRX/CRY controls
+        # break that site-to-operator correspondence.
+        p_u3a, p_u3b, p_u3c, p_crx, p_cry = _perms(n_qubits, ansatz == 'scrambled', 5)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
@@ -685,14 +743,14 @@ class Level7QuantumLayer(nn.Module):
             # chem_inputs is (B, n_qubits): broadcast over the batch dim.
             for l in range(n_layers):
                 for i in range(n_qubits):
-                    qml.U3(chem_inputs[:, i] * weights[l, i, 0],
-                           chem_inputs[:, i] * weights[l, i, 1],
-                           chem_inputs[:, i] * weights[l, i, 2], wires=i)
+                    qml.U3(chem_inputs[:, p_u3a[i]] * weights[l, i, 0],
+                           chem_inputs[:, p_u3b[i]] * weights[l, i, 1],
+                           chem_inputs[:, p_u3c[i]] * weights[l, i, 2], wires=i)
                 if entangle:
                     for i in range(n_qubits - 1):
                         # Multi-controlled interactions representing complex pharmacophore dependencies
-                        qml.CRX(chem_inputs[:, i] * weights[l, i, 3], wires=[i, i+1])
-                        qml.CRY(chem_inputs[:, i+1] * weights[l, i, 4], wires=[i, i+1])
+                        qml.CRX(chem_inputs[:, p_crx[i]] * weights[l, i, 3], wires=[i, i+1])
+                        qml.CRY(chem_inputs[:, p_cry[i+1]] * weights[l, i, 4], wires=[i, i+1])
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
         self.qnode = circuit

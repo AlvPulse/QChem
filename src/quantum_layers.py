@@ -22,7 +22,11 @@ class QuantumLayer(nn.Module):
                 # Standard VQC
                 qml.AngleEmbedding(inputs, wires=range(n_qubits))
 
-                if ansatz == 'strong':
+                if ansatz in ('strong', 'scrambled'):
+                    # Level 1 has no chemistry->operator-geometry mapping (a single generic
+                    # embedding + entangler), so the 'scrambled' control is structurally
+                    # identical to 'strong' here. The scramble has a lever only from Level 2
+                    # onward, where features drive specific operator families/geometry.
                     qml.StronglyEntanglingLayers(weights, wires=range(n_qubits))
                 elif ansatz == 'mps':
                     qml.BasicEntanglerLayers(weights, wires=range(n_qubits))
@@ -48,7 +52,7 @@ class QuantumLayer(nn.Module):
 
         self.qnode = circuit
 
-        if ansatz == 'strong':
+        if ansatz in ('strong', 'scrambled'):
             self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 3))
         elif ansatz == 'reupload':
             self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 3))
