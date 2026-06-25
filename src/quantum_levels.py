@@ -61,7 +61,7 @@ class Level1Quantum(nn.Module):
     Level 1 Quantum: "Three Circuits + Attention"
     Features are routed to independent Quantum models and aggregated via classical attention.
     """
-    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2, ansatz="strong"):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
 
