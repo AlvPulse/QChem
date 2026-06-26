@@ -86,6 +86,17 @@ python run_experiment.py --model hybrid_ensemble --estimators 4 --qubits 4 --lay
 python run_experiment.py --model rf
 ```
 
+## Results & Benchmarking Chapter
+
+The dissertation-style **Results and Benchmarking** write-up is
+[`docs/06_results_benchmarking.md`](docs/06_results_benchmarking.md): a per-model + cross-model
+report anchored on the statistically valid Level-8/probe family (the absorbability proof shows the
+seven abstract levels' `structured − scrambled` is vacuous at L1/2/4). Numbers come from a single
+sourced module (`report_data.py`); figures from `make_figures.py` → `docs/figures/`; an optional
+reduced-fidelity corroboration harness is `make_figdata.py`. Implementation/methods (data
+re-uploading, graph-gated entangler, bond-correlator readout, control definitions, training regime)
+are in [`docs/07_technical_implementation.md`](docs/07_technical_implementation.md).
+
 ## Full Benchmark Suite
 
 `run_benchmark.py` runs the rigorous comparison: **scaffold-grouped** K-fold CV over the
