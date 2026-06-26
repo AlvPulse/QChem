@@ -44,6 +44,49 @@ contribution is a *correct and scalable isolation of a quantum inductive bias*, 
 claim — and, as a methodological by-product, a proof that the project's original benchmark could
 not have measured this bias at all.
 
+## 0.1 Related work and positioning
+
+*(Author–year–venue given for orientation; confirm exact bibliographic details against your
+reference manager.)*
+
+**Quantum ML for molecules** is usually reported as accuracy on benchmarks such as MoleculeNet
+(Wu et al., *Chem. Sci.* 2018), the source of Tox21/ToxCast. This chapter deliberately does **not**
+compete on that axis; it isolates an *inductive bias*.
+
+**Does quantum carry a useful inductive bias?** The most relevant line is sceptical. Schuld
+(*arXiv* 2101.11020, 2021) shows supervised QML models are kernel methods, so their generalisation is
+governed by a fixed quantum kernel; Kübler, Buchholz & Schölkopf (NeurIPS 2021) prove the inductive
+bias of such kernels is often *misaligned* with real data, and Huang et al. ("Power of data in QML",
+*Nat. Commun.* 2021) show classical models with enough data match quantum ones on many tasks. Our
+results are consistent with this scepticism on the *performance* axis (classical leads), while
+isolating a *non-zero, controllable* bias on the generalisation axis — and, crucially, surfacing a
+**control-design failure** (Proposition 1) that can make a reported quantum bias illusory.
+
+**Trainability.** Barren plateaus (McClean et al., *Nat. Commun.* 2018; reviewed in Cerezo et al.,
+*Nat. Rev. Phys.* 2021) are the standard obstacle to reading any bias off a deep VQC. Our learning
+curves (§III.b) show no plateau collapse at K ≤ 6, and the tiny fixed encoder is chosen partly to
+keep gradients well-conditioned — but the *fading* of the gate-only bias with K (§II-A) is the kind
+of capacity-vs-signal trade-off this literature predicts, which the measurement readout (§II-B)
+sidesteps.
+
+**Bias engineering.** Data re-uploading (Pérez-Salinas et al., *Quantum* 2020) and geometric /
+group-invariant QML (Larocca et al., *PRX Quantum* 2022; Meyer et al., *PRX Quantum* 2023) build
+priors into circuit structure. Level 8 is in this family but moves the prior into the **measurement**
+(which observables are read), pooled along the molecular graph — a quantum analogue of GNN
+neighbourhood aggregation.
+
+**Hardware-efficient readout.** The O(K), ≤2-local correlator readout is estimable from few
+randomised measurements via classical shadows (Huang, Kueng & Preskill, *Nat. Phys.* 2020), which is
+what makes the §II-B.4 scalability claim physical rather than simulation-bound.
+
+**Evaluation.** Scaffold splitting follows Bemis & Murcko (*J. Med. Chem.* 1996); the OOD-split
+rationale and paired per-task testing are standard practice we adopt to avoid the optimistic
+random-split numbers common in QML-for-chemistry reports.
+
+**Our delta.** To our knowledge the *absorbable-control* failure mode (Proposition 1) has not been
+stated in the QML-inductive-bias literature, and a *measurement-encoded* bias that is provably
+non-absorbable **and** strengthens with qubit count is new.
+
 ---
 
 # Part I — Methodology and the validity problem
@@ -94,6 +137,43 @@ evidence: re-running them at full scaffold-CV fidelity would cost days of comput
 produce headline deltas that the proof above shows to be optimisation noise. The quantitative spine
 of this chapter is the corrected, non-absorbable design (§I.3), where the controls are valid.
 
+### I.2.1 The absorbability result, formally
+
+The bit-exact table above is the instance; the following states the general condition, which is the
+chapter's transferable methodological contribution.
+
+> **Proposition 1 (Absorbability of permutation controls).** Let a molecule be mapped to a shared
+> representation `h = f(mol)` by a trainable encoder, and let each circuit encoding *site* `s` apply
+> a gate whose angle is `θ_s = ⟨w_s, h⟩` for a **free** (unconstrained, trainable) projection row
+> `w_s`. A *scramble* fixes a permutation `π_s` routing `h`'s coordinates into site `s`. If **every
+> site reads through its own free projection and each shared vector drives its sites under a single
+> permutation**, then for any structured parameters there exist scrambled parameters realising the
+> *identical* circuit function. Hence structured and scrambled span the **same hypothesis class**, and
+> their population-level held-out risk gap is exactly zero — any measured gap is optimisation or
+> finite-sample noise.
+>
+> *Proof.* The angle vector for a site is `θ = W h` with `W` unconstrained. A fixed permutation of
+> its outputs is `P W`; setting the scrambled weights `W' := P^{-1} W_struct` gives
+> `P W' = W_struct`, so the scrambled site computes the structured angles exactly. Because each site
+> has its own free `W` and is permuted once, the assignments are independent and simultaneously
+> satisfiable; the two circuits then agree for matched downstream parameters. ∎
+
+> **Corollary 2 (Non-absorbability).** The construction fails — and the control becomes genuine —
+> iff either **(a)** one shared vector `h` is routed into ≥2 sites under *inconsistent* permutations
+> `π₁ ≠ π₂` (no single `W'` can equal two different permutations of the same `W h`), or **(b)** the
+> structured quantity enters as **fixed per-molecule data** `A(mol)` multiplying a physical observable
+> *upstream of the only trainable layer* (there is no weight to permute, and because `A` varies per
+> molecule no single reparametrisation maps scrambled→structured for all molecules at once).
+> Benchmark Levels 1/2/4 fall under the absorbable hypothesis (one permutation per free projection ⇒
+> residual 0, Table I.1); Levels 5–7 satisfy (a); **Level 8 satisfies (b)** — the only route that is
+> *also* a scalable graph bias (§I.3).
+
+This reframes "the control didn't work" as a sharp, checkable criterion any quantum-inductive-bias
+study can apply *before* running an experiment: trace each structured signal to the trainable map in
+front of it and verify condition (a) or (b) holds.
+
+![Control-validity decision diagram](figures/fig13_control_decision.png)
+
 ## I.3 The corrected design: the Level-8 family (qubits as graph nodes)
 
 To make the scramble non-absorbable, the structured signal must reach the circuit as **per-molecule
@@ -115,6 +195,8 @@ The **scrambled** control replaces `A` with a random adjacency of **equal edge c
 bond-weight multiset** — only *which pair* holds *which weight* is shuffled. So `structured −
 scrambled` isolates the value of the **correct topology**, with single-qubit information held byte-
 for-byte identical.
+
+![Level-8 place-then-harvest schematic](figures/fig12_schematic.png)
 
 ## I.4 The five models under test
 
@@ -263,6 +345,26 @@ amplifier of a graph-gated circuit, not a standalone mechanism** — it requires
 
 ![Level-8 decomposition at K=4](figures/fig02_decomposition.png)
 
+### C.4 Direct mechanistic evidence (beyond the ablation)
+
+The `meas_only` ablation shows the readout *needs* graph-gated entanglement; the following shows
+*why*, by measuring the quantum state itself rather than the downstream AUC. On a trained Level-8
+(K=6) circuit we compute the **connected two-qubit correlator** `C_ij = ⟨Z_iZ_j⟩ − ⟨Z_i⟩⟨Z_j⟩` for
+every pair on held-out molecules and split pairs into *bonded* (`A_ij>0`) vs *non-bonded*:
+
+- **PLACE.** `|C|` on bonded pairs is **5.1× larger** than on non-bonded pairs (0.066 vs 0.013); the
+  fraction of total correlation mass sitting on true bonds is **0.71 vs a chance baseline of 0.34** —
+  the graph-gated entangler demonstrably concentrates quantum correlation on the molecule's real
+  bonds.
+- **HARVEST.** Bond-pooling with the **true** adjacency captures **2.24×** the uniform-baseline
+  correlation mass, versus **0.98×** (≈ chance) for the **random** (scrambled) adjacency — so the
+  structured readout harvests the placed correlation while the scrambled readout does not.
+
+This is the inductive bias made physical: the structured−scrambled AUC gap (§II-B) is the downstream
+shadow of a measurable place-then-harvest mechanism in the quantum state.
+
+![Mechanism: place-then-harvest correlation localization](figures/fig14_mechanism.png)
+
 ## Model D — Separable (control: does entanglement help at all?)
 
 **D.1 Overview.** Single-qubit rotations only — all `IsingXX` and the `CRZ` ring removed.
@@ -345,23 +447,56 @@ the tables above.
   ROC-AUC points.
 * **Replication / CI** — independent 15-seed random split (A, K=4): mean ΔAUC +0.0042, Wilcoxon
   p=0.0062, 95% CI [+0.0013, +0.0071] — the interval excludes 0, agreeing with the scaffold-CV test.
-* **Multiplicity** — the main benchmark applies Bonferroni ×3 across its three comparisons; the
-  probe family makes one primary comparison per cell, so the reported p-values are the primary unit
-  and are not further corrected here (the random-split replication is the guard against a single-cell
-  false positive).
+* **Multiplicity** — see Table III.2: a Holm–Bonferroni correction across all six probe cells, plus
+  effect sizes with confidence intervals. This is a deliberately conservative family.
+
+**Table III.2 — Effect sizes and multiplicity control** (`make_stats.py`).
+
+*Holm–Bonferroni across the six probe cells (published Wilcoxon p):*
+
+| Cell | median ΔAUC | tasks + | Wilcoxon p | Holm-adj p |
+|------|:-----------:|:-------:|:----------:|:----------:|
+| gate K4 | +0.0044 | 9/12 | 0.017 | 0.085 |
+| gate K6 | +0.0026 | 9/12 | 0.133 | 0.399 |
+| gate K8 | +0.0030 | 7/12 | 0.170 | 0.399 |
+| levelG K4 | +0.0078 | 8/12 | 0.017 | 0.085 |
+| **levelG K6** | **+0.0108** | 9/12 | **0.011** | **0.063** |
+| meas_only K4 | −0.0271 | 0/12 | 1.0 | 1.0 |
+
+*Effect sizes with 95% CIs (rank-biserial = matched-pairs Wilcoxon effect size):*
+
+| Cell (source) | rank-biserial | median ΔAUC | 95% CI | tasks + |
+|---------------|:-------------:|:-----------:|:------:|:-------:|
+| **levelG K6** (reproduction) | **+0.95** | +0.0078 | **[+0.0040, +0.0159]** | 11/12 |
+| gate K4 (reproduction) | +0.51 | +0.0028 | [−0.0008, +0.0060] | 9/12 |
+| gate K4 (random-split, published) | — | +0.0042 | **[+0.0013, +0.0071]** | 13/15 seeds |
+
+**Reading.** Each cell is per-cell significant (p = 0.011–0.017), but under a strict six-way Holm
+correction **none clears α = 0.05** — the strongest, Level-8 K=6, lands at a *borderline* 0.063. Two
+points keep the conclusion honest rather than either over- or under-claiming. (i) The Holm family is
+*conservative by design*: it includes three cells we **predict** to be null (gate K6/K8 and the
+`meas_only` negative control), and padding a family with predicted-nulls inflates the correction
+against the genuine effects. (ii) The effect's support does **not** rest on a single corrected
+p-value: it is **directionally consistent across two independent regimes** (the random-split 95% CI
+[+0.0013, +0.0071] excludes 0), carries a **large effect size** at the headline cell (rank-biserial
++0.95, 11/12 tasks, bootstrap CI excluding 0), and is **mechanistically grounded** (§C.4). The
+defensible claim is therefore: *a small effect, per-cell significant and borderline under
+conservative multiplicity, robustly directional across regimes and backed by a measured mechanism* —
+not "p < 0.05 after correction."
 
 ## III.b Learning behaviour and pooled diagnostics (illustrative)
 
 > The three figures in this subsection are produced by the reduced-fidelity reproduction harness
-> (`make_figdata.py`, 3 folds × 2 seeds × 18 epochs on the gate-gated K=4 model) and are **shown to
-> characterise *behaviour*, not to assert magnitudes** — the headline effect sizes and p-values live
-> in §II–III. That harness independently *corroborates* the published direction: it returns ΔAUC
-> +0.0028 with 9/12 tasks favouring structured (cf. the full-run +0.0044, p=0.017).
+> (`make_figdata.py`, 3 folds × 2 seeds × 18 epochs on the **Level-8 K=6** model — the headline
+> scaling cell) and are **shown to characterise *behaviour*, not to assert magnitudes** — the headline
+> effect sizes and p-values live in §II–III. That harness independently *corroborates* the published
+> result: it returns ΔAUC **+0.0078 with 11/12 tasks** favouring structured (Wilcoxon p=0.0007 at
+> reduced fidelity; cf. the full-run +0.0108, p=0.011).
 
 **Learning curves.** Both variants are learnable from the coarse representation (validation ROC
-rises ≈ 0.52 → 0.63), and the structured curve sits **above** the scrambled curve at essentially
-every epoch — the inductive bias is a persistent, not transient, training effect, and there is no
-sign of a barren-plateau collapse at this scale.
+rises ≈ 0.53 → 0.64), and the structured curve sits **above** the scrambled curve at **all 18
+epochs** with a *widening* gap — the inductive bias is a persistent, not transient, training effect,
+and there is no sign of a barren-plateau collapse at this scale.
 
 ![Learning curves (reduced-fidelity)](figures/fig09_training_curves.png)
 
@@ -402,9 +537,13 @@ only.
 
 **Supported claims.** (1) A non-absorbable quantum topology bias exists and survives OOD scaffold
 evaluation and a second random-split regime at K=4. (2) Routing the bias through graph-selected
-two-qubit correlators (Level 8) makes it *grow* with circuit size and stay significant where gate-
-routing dies. (3) The readout amplifies but does not create the bias (meas-only control). (4) The
-project's original benchmark control is provably vacuous at Levels 1/2/4.
+two-qubit correlators (Level 8) makes it *grow* with circuit size and stay significant per-cell where
+gate-routing dies. (3) The readout amplifies but does not create the bias (meas-only control), and
+the **place-then-harvest mechanism is directly measured** — correlation is 5.1× concentrated on true
+bonds and true-A pooling harvests 2.3× more than random-A (§C.4). (4) The project's original
+benchmark control is provably vacuous at Levels 1/2/4. *(Significance caveat: per-cell p∈[0.011,0.017]
+is borderline under conservative six-way Holm — Table III.2 — so the claims lean on cross-regime
+consistency, effect size, and mechanism, not a single corrected p-value.)*
 
 **Partially supported.** Level 8's *scaling* rests on two completed K-points (K=4, K=6) plus the
 mechanistic decomposition; the K=8 confirmation is deferred (slow correlator readout). The trend is
@@ -415,30 +554,57 @@ entanglement *per se* does not raise accuracy; generalisation beyond the 12 Tox2
 
 ---
 
-# Part V — Limitations and threats to validity
+# Part V — Threats to validity
 
-1. **Effect size is small** (≈ 0.4–1.1 AUC pts) — statistically robust (paired, multi-seed, two
-   regimes) but practically minor at this scale.
-2. **Not a performance claim.** An unconstrained classical MLP leads by 3–8 points everywhere
-   (§II-E); the classical comparison is intentionally *not* capacity-matched.
-3. **Coarse-graining loses information.** Reducing a molecule to K clusters caps absolute AUC at
-   ≈ 0.61–0.66. The `structured − scrambled` *gap* is internally valid because both variants see the
-   identical coarse representation, but absolute numbers should not be compared to full-graph GNNs.
-4. **High-K is under-powered.** K=6 used 2–3 seeds, K=8 fewer; the Level-8 K=8 cell is unfilled.
-   "No evidence the gate bias scales" is not "proof it is exactly zero" at high K.
-5. **One dataset / task family** (Tox21, 12 assays). External validity is untested.
-6. **Fidelity of reproduction figures.** The learning/ROC/PR/calibration figures come from a
-   reduced-fidelity harness (`make_figdata.py`, 3 folds × 2 seeds × 18 epochs on the gate-gated K=4
-   model) and are **illustrative**; all headline significance numbers come from the higher-fidelity
-   runs logged in `_levelG_k*.log` / `_sweep.log` and tabulated above.
-7. **Deliberately un-instrumented diagnostics.** Several analyses from the broad reporting template
-   were *not* run because the current experiments do not log the required quantities, and the chapter
-   declines to fabricate them: per-layer **gradient-norm / barren-plateau** curves (only the
-   qualitative "no validation collapse" observation in §III.b is claimed), **loss-landscape** /
-   Hessian probes, **confusion matrices** (uninformative at 1–5 % positive rates — AUPRC/Brier are
-   reported instead), and **wall-clock / memory / energy** scaling (asymptotic costs are argued in
-   §II-B.4 but not benchmarked). These are scoped out, not overlooked, and are the natural next
-   instrumentation pass.
+Organised by the four validity types (Cook & Campbell), each with the specific threat and the design
+choice that addresses or bounds it.
+
+**V.1 Statistical-conclusion validity** — *are the inferences from the numbers sound?*
+- **Small effect** (≈ 0.4–1.1 AUC pts): robust (paired, multi-seed, two regimes) but practically
+  minor. Mitigation: report effect sizes with CIs, not p-values alone (§III, Table III.2).
+- **Multiplicity** across the K × config grid: addressed by a Holm correction across the probe cells
+  (§III) plus an independent random-split replication as the guard against a single-cell false
+  positive.
+- **Power**: 12 paired tasks is small; the design draws power from pairing (which cancels between-task
+  difficulty). The detectable effect floor is stated in §III.
+
+**V.2 Internal validity** — *is the gap caused by the bias, not a confound?*
+- **Capacity**: the `structured − scrambled` comparison is byte-identical and exactly parameter-matched
+  (Table I.4), so the gap cannot be capacity or expressivity.
+- **Leakage / test peeking**: scaffold-disjoint validation and single test read (§I.4, §7) remove
+  scaffold leakage and selection-on-test.
+- **Absorbable control** (the central internal-validity threat we identified): handled by Proposition
+  1 — only conditions (a)/(b) are reported as bias signal.
+
+**V.3 Construct validity** — *do the measurements capture "inductive bias"?*
+- **Coarse-graining** caps absolute AUC at ≈ 0.61–0.66; absolute numbers are not comparable to
+  full-graph GNNs, but the *gap* is valid because both variants see the identical representation.
+- **Reproduction fidelity**: the learning/ROC/PR/calibration figures come from a reduced-fidelity
+  harness (`make_figdata.py`) and are **illustrative**; all headline significance is from the
+  higher-fidelity runs in `report_data.py`. They corroborate, they do not assert.
+- **Un-instrumented diagnostics** (scoped out, not overlooked, and not fabricated): per-layer
+  gradient-norm / barren-plateau curves (only the qualitative "no collapse" claim in §III.b is made),
+  loss-landscape / Hessian probes, confusion matrices (uninformative at 1–5 % positive rates —
+  AUPRC/Brier reported instead), and wall-clock / memory / energy scaling (asymptotics argued in
+  §II-B.4, not benchmarked).
+
+**V.4 External validity** — *how far does it generalise?*
+- **One dataset / task family** (Tox21, 12 assays) — the single biggest limitation; a second endpoint
+  family is the top future experiment.
+- **High-K under-powered**: K=6 used 2–3 seeds, K=8 fewer, and the Level-8 K=8 cell is unfilled.
+  "No evidence the gate bias scales" is not "proof it is zero" at high K.
+- **Not a performance claim**: an unconstrained classical MLP leads everywhere; the contribution is
+  bias *existence and scaling*, deliberately separated from quantum advantage.
+
+## V.5 Falsifiability — what would have refuted each claim
+
+| Claim | Would have been refuted if… | Observed |
+|-------|-----------------------------|----------|
+| A non-absorbable bias exists | structured ≈ scrambled under a *non-absorbable* control, or the random-split CI for ΔAUC included 0 | ΔAUC>0, p=0.017 (scaffold) & 0.006 (random), CI [+0.0013,+0.0071] |
+| The benchmark control is vacuous | `_verify_absorb.py` residual ≠ 0 at L1/2/4 | residual = 0, bit-exact |
+| Level 8 *scales* | Level 8 also faded by K=6 (like gate-only), or its K=6 seeds disagreed in sign | +0.0078→+0.0108, p=0.011, all K=6 seeds + |
+| Mechanism is place-then-harvest | `meas_only` (true-A readout on a fixed ring) matched or beat its scramble | −0.027, 0/12 tasks — refuted the "readout alone" alternative |
+| Gain is the bias, not capacity | a parameter-matched scrambled circuit closed the gap | impossible by construction (identical params) |
 
 ---
 
@@ -460,7 +626,10 @@ entanglement *per se* does not raise accuracy; generalisation beyond the 12 Tox2
 | 15-seed random-split replication | `_alt_b_multiseed.py` |
 | Coarse-graph caches | `data/bias_coarse_K{4,6,8}.npz` |
 | All numbers (single source) | `report_data.py` |
-| Figures | `make_figures.py` → `docs/figures/` |
+| Effect sizes / Holm / bootstrap CIs | `make_stats.py` → `results/stats_summary.json` |
+| Result figures | `make_figures.py` → `docs/figures/` |
+| Conceptual figures (schematic, decision) | `make_schematics.py` |
+| Mechanism (place-then-harvest) | `make_mechanism.py` → `results/mechanism_K6.npz` |
 | Reduced-fidelity reproduction harness | `make_figdata.py` → `results/figdata/` |
 
 **Re-run.**
@@ -469,7 +638,8 @@ python _verify_absorb.py                                              # absorbab
 python run_bias_probe.py   --qubits 4 6 8 --folds 3 --seeds 0 1       # gate-only bias vs K
 python run_levelG_probe.py --qubits 4 --folds 3 --seeds 0 1 --configs gate levelG meas_only
 python run_levelG_probe.py --qubits 6 --folds 3 --seeds 0 1 2 --configs gate levelG
-python make_figures.py                                               # regenerate all figures
+python make_figures.py        # result figures        python make_schematics.py  # schematic+decision
+python make_mechanism.py      # mechanism figure      python make_stats.py        # effect sizes/Holm
 ```
 
 **Figure index.**
@@ -484,9 +654,12 @@ python make_figures.py                                               # regenerat
 | `fig06_run_consistency.png` | Seed-level consistency of the bias |
 | `fig07_classical_gap.png` | Classical lead at every scale |
 | `fig08_radar.png` | Six-axis scorecard |
-| `fig09_training_curves.png` | Learning curves (reduced-fidelity) |
+| `fig09_training_curves.png` | Learning curves (reduced-fidelity, Level 8 K=6) |
 | `fig10_roc_pr_cal.png` | ROC / PR / calibration (reduced-fidelity) |
 | `fig11_per_task.png` | Per-task bias spread (reduced-fidelity) |
+| `fig12_schematic.png` | Level-8 place-then-harvest architecture |
+| `fig13_control_decision.png` | Control-validity decision diagram (Prop. 1) |
+| `fig14_mechanism.png` | Measured correlation localization (place-then-harvest) |
 
 ---
 

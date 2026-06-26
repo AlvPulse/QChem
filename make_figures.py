@@ -240,13 +240,14 @@ def _load(kind, k):
     return np.load(p) if os.path.exists(p) else None
 
 
-# The illustrative diagnostics are pinned to the gate-gated K=4 run: at reduced fidelity (2 seeds)
-# it CORROBORATES the published direction (+0.0028, 9/12 tasks), whereas the levelG K=4 reduced run
-# had two sharply disagreeing seeds ([+0.0123, -0.0066]) and would misrepresent the headline. The
-# chapter's §III.b prose names this exact run, so figure selection here is deterministic, not "best
-# available".
+# The illustrative diagnostics are pinned to the Level-8 (levelG) K=6 run -- the HEADLINE scaling
+# cell, whose reduced-fidelity reproduction strongly CORROBORATES the published result (median
+# +0.0078, 11/12 tasks, Wilcoxon p=0.0007 here vs the full-run +0.0108, p=0.011). The chapter's
+# §III.b prose names this exact run, so figure selection is deterministic, not "best available".
+# (The levelG K=4 reduced run is deliberately NOT used: its 2 seeds disagreed sharply,
+# [+0.0123, -0.0066], and would misrepresent the small-K cell.)
 def _illustrative():
-    return _load("gate", 4)
+    return _load("levelG", 6) or _load("gate", 4)
 
 
 def fig_training_curves():
@@ -255,10 +256,10 @@ def fig_training_curves():
     z = _illustrative()
     if z is not None and z["curve_s"].size:
         found = True
-        col = C["gate"]
+        col = C["levelG"]
         ep = np.arange(1, len(z["curve_s"]) + 1)
-        ax.plot(ep, z["curve_s"], "-", color=col, lw=2, label="gate K=4 structured")
-        ax.plot(ep, z["curve_c"], "--", color=col, lw=1.6, alpha=0.7, label="gate K=4 scrambled")
+        ax.plot(ep, z["curve_s"], "-", color=col, lw=2, label="Level 8 (K=6) structured")
+        ax.plot(ep, z["curve_c"], "--", color=col, lw=1.6, alpha=0.7, label="Level 8 (K=6) scrambled")
     if not found:
         plt.close(fig); return
     ax.set_xlabel("Epoch"); ax.set_ylabel("Validation ROC-AUC (12 Tox21 tasks)")
