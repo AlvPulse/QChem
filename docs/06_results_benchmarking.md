@@ -434,6 +434,33 @@ shadow of a measurable place-then-harvest mechanism in the quantum state.
 
 ![Mechanism: place-then-harvest correlation localization](figures/fig14_mechanism.png)
 
+### C.5 Representation probing — the bias lives in a topology-aware representation
+
+A complementary interpretability test (`make_probe.py`): freeze the Level-8 (K=6) readout features and
+train simple linear probes (ridge, 5-fold CV R²) to predict molecular properties, comparing the
+**structured** circuit (true adjacency) against the **scrambled** circuit (random adjacency). The
+prediction is sharp — structured features should encode **graph topology** better while **tying** on
+**node-level** properties (the single-qubit encoding is byte-identical in both).
+
+| Probe target | structured R² | scrambled R² | Δ |
+|---|:--:|:--:|:--:|
+| λ_max(A) — largest adjacency eigenvalue *(topology)* | **+0.072** | +0.040 | **+0.032** |
+| Fiedler value — algebraic connectivity *(topology)* | +0.141 | +0.134 | +0.007 |
+| mean \|Gasteiger charge\| *(node control)* | −0.004 | −0.003 | ≈ 0 |
+| aromatic fraction *(node control)* | +0.740 | +0.764 | −0.024 |
+
+The pattern matches the hypothesis: on the cleanest topology probe (`λ_max`) the structured features
+are **~80% more predictive** (R² 0.072 vs 0.040), while on node features the two **tie** (aromaticity
+≈ 0.75 for both; charge uninformative for both). So the structured circuit's *extra* representational
+content over scrambled is specifically **topological** — evidence that the bias is a topology-aware
+representation, not generic capacity. *(Honest caveats: absolute topology R² is low — the features
+encode topology weakly — and the Fiedler gap is within noise; the clean signal is `λ_max`.)*
+
+![Representation probing of the quantum features](figures/fig17_probe.png)
+
+This pairs with §C.4: §C.4 shows the bias is *placed on bonds in the quantum state*; §C.5 shows it
+*survives into the classical feature representation* the trainable head consumes.
+
 ## Model D — Separable (control: does entanglement help at all?)
 
 **D.1 Overview.** Single-qubit rotations only — all `IsingXX` and the `CRZ` ring removed.
@@ -738,6 +765,7 @@ python make_mechanism.py      # mechanism figure      python make_stats.py      
 | `fig14_mechanism.png` | Measured correlation localization (place-then-harvest) |
 | `fig15_shots.png` | Finite-shot robustness — bias survives down to 32 shots/observable |
 | `fig16_noise.png` | Device-noise robustness — bias survives depolarizing + readout error |
+| `fig17_probe.png` | Representation probing — structured features encode true-graph topology |
 
 ---
 

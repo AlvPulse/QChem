@@ -55,7 +55,7 @@ power/artifact additions (Lemma 3, computed power, `requirements.txt`) are alrea
 | Requirement | Have | Gap | Sev | Effort | Repo |
 |---|---|---|:--:|:--:|---|
 | Mechanism evidence | **place-then-harvest correlation localization** (5.1× on bonds) | strong, but it's one view | ✅/🟠 | — | `make_mechanism.py`, fig14 |
-| Representation probing | none | no **t-SNE/UMAP** of quantum features, no **probing classifier** for chemical properties, no per-task "what chemistry does the bias help?" | 🟡 | M | cached features → cheap |
+| Representation probing | ✅ **DONE** (core) — `make_probe.py`/fig17: linear probes show structured features encode true-graph topology (λ_max R² +0.072 vs +0.040) and tie on node controls | (was 🟡) | — | `make_probe.py`, `docs/06` §C.5 |
 
 ### B.5 Statistics & methodology
 | Requirement | Have | Gap | Sev | Effort | Repo |
@@ -116,7 +116,7 @@ power/artifact additions (Lemma 3, computed power, `requirements.txt`) are alrea
 | 6 | Formal lemma: why bond-correlator readout preserves graph signal single-qubit loses | theory depth | 🟠 | M |
 | 7 | Strong baselines (full-graph GINE, RF-fingerprints) for absolute context | baseline credibility | 🟠 | L–M |
 | 8 | Verified literature review (replace the §0.1 sketch) + `requirements` lock + data-availability | scholarship/artifacts | 🟠 | M |
-| 9 | Representation probing (t-SNE + probing classifier) | interpretability (Q11) | 🟡 | M |
+| 9 | ✅ Representation probing DONE (`make_probe.py`); optional: t-SNE + per-task "which chemistry" | interpretability (Q11) | ✅ | — |
 
 Items 1–4 are the gate to a high-stakes venue; 5–9 are what move it from "accept with major revisions"
 toward "accept." Items 1, 5 are partly done or trivial and would land quickly.
