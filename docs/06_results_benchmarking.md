@@ -358,6 +358,28 @@ This is not merely asymptotic bookkeeping: §C.4 measures it directly — on a t
 connected correlator `|C_ij|` is **5.1× larger on bonded than non-bonded pairs**, exactly the signal
 `S` discards and `B_A` harvests.
 
+### B.7 Finite-shot robustness — the readout survives real measurement
+
+The O(K) readout (§B.4) is only useful on hardware if the bias survives estimating the observables
+from a finite number of **measurement shots** rather than the exact statevector. We test this
+directly (`make_shots.py`): train Level-8 (K=6) exactly, then at test time replace every single-qubit
+⟨X,Y,Z⟩ and two-qubit ⟨Z_iZ_j⟩,⟨X_iX_j⟩ expectation with an **N-shot estimate** (each Pauli measured
+*independently* — a conservative upper bound on noise; commuting groups and classical shadows do
+strictly better), and recompute the pooled-CV bias over 12 shot-noise realizations.
+
+The bias is **essentially shot-invariant**: against an exact-statevector ΔAUC = +0.018 (this run), at
+**N = 32 shots per observable** ΔAUC = **+0.0184 ± 0.0015 with 100% of realizations positive** —
+indistinguishable from exact down to the smallest budget tested — and absolute AUC degrades only
+marginally (structured 0.638 at N=32 → 0.641 exact). Two reasons: the bias is a structured−scrambled
+*difference*, so symmetric shot noise cancels in expectation; and the bond-pooled correlators are
+**low-variance aggregates** (sums over edges), not single fragile observables. The readout's advantage
+is therefore **not a statevector artifact** — it is estimable at a hardware-realistic shot budget,
+substantiating the O(K), hardware-native claim of §B.4. *(Caveat: a single 3-fold/1-seed run whose
+exact ΔAUC +0.018 sits at the high end of the K=6 range — the shot-invariance, not the absolute
+magnitude, is the result.)*
+
+![Finite-shot robustness of the bond-correlator readout](figures/fig15_shots.png)
+
 ## Model C — Measurement-only (ablation: is the readout a standalone trick?)
 
 **C.1 Overview.** The bond-correlator readout of Model B, but with a **graph-independent fixed ring**
@@ -700,6 +722,7 @@ python make_mechanism.py      # mechanism figure      python make_stats.py      
 | `fig12_schematic.png` | Level-8 place-then-harvest architecture |
 | `fig13_control_decision.png` | Control-validity decision diagram (Prop. 1) |
 | `fig14_mechanism.png` | Measured correlation localization (place-then-harvest) |
+| `fig15_shots.png` | Finite-shot robustness — bias survives down to 32 shots/observable |
 
 ---
 

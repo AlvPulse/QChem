@@ -14,12 +14,13 @@ The project has a **genuinely publishable core** — the *absorbable-control* fi
 is a novel, broadly-applicable methodological result, and the *measurement-encoded, non-absorbable,
 scaling* inductive bias (Level 8) is a clean positive result with honest statistics. That core is
 currently at the level of a **strong methods note / workshop paper**. To clear a **high-stakes
-journal** it is missing, in priority order: **(1) external validity** (a single 12-task dataset is
-disqualifying on its own), **(2) a parameter-matched classical control on the coarse graph** (without
-it, the central "it's an inductive bias, not capacity" claim has a hole a reviewer will drive
-through), and **(3) a finite-shot / noise analysis** to substantiate the "hardware-native, O(K),
-scalable" selling point that is currently statevector-only. These three are the difference between
-"interesting and correct" and "publishable in a top venue."
+journal** it was missing three things, in priority order: **(1) external validity** (a single 12-task
+dataset is disqualifying on its own — *still open*), **(2) a parameter-matched classical control on
+the coarse graph** (without it the "inductive bias, not capacity" claim has a hole — *in progress
+separately*), and **(3) a finite-shot / noise analysis** to substantiate the "hardware-native, O(K),
+scalable" selling point (*shot part ✅ done — §B.7/`make_shots.py`; device-noise sweep still open*).
+Closing (1) is now the single remaining gate to a top venue; (3)'s shot result and the theory/power/
+artifact additions (Lemma 3, computed power, `requirements.txt`) are already in.
 
 ---
 
@@ -38,7 +39,7 @@ scalable" selling point that is currently statevector-only. These three are the 
 ### B.2 The scalability / hardware claim (central selling point)
 | Requirement | Have | Gap | Sev | Effort | Repo |
 |---|---|---|:--:|:--:|---|
-| Finite-shot analysis | exact statevector expectations | **no shot-budget study** — how many shots to resolve the bond-correlators well enough for the bias to survive? This is the crux of "hardware-native, O(K)" | 🔴/🟠 | M | new sim on cached `data/bias_coarse_K*.npz` |
+| Finite-shot analysis | ✅ **DONE** — `make_shots.py`/fig15: bias is shot-invariant down to **32 shots/observable** (ΔAUC +0.0184, 100% realizations +); backs the hardware-native O(K) claim | (was 🔴/🟠) | — | `make_shots.py`, `docs/06` §B.7 |
 | Noise model | none | no **depolarizing / readout-error** robustness; a quantum venue expects at least a NISQ noise sweep | 🟠 | M | PennyLane `default.mixed` |
 | Real-hardware demonstration | none | optional but high-impact for a quantum venue (small K on IBM/IonQ) | 🟡 | H | — |
 | Scaling beyond K=8 | K∈{4,6,8} (statevector-bound) | the O(K) claim is asymptotic; argued not measured beyond 8 (acceptable IF the shot analysis backs it) | 🟠 | — | tie to shot analysis |
@@ -92,12 +93,13 @@ scalable" selling point that is currently statevector-only. These three are the 
    already exists — just match its width to the quantum param count and run structured-vs-scrambled
    on it) and it is the single highest-value-per-hour addition in this document.
 
-3. **Finite-shot / noise analysis (🔴–🟠).** The paper's distinctive claim is "hardware-native,
-   O(K), scalable measurement readout." Everything is exact statevector, so that claim is currently
-   *unbacked*. A finite-shot simulation — re-estimate the bond-correlators from N shots and ask at
-   what shot budget the structured−scrambled bias survives — directly substantiates it and is the
-   experiment a quantum reviewer will specifically look for. A depolarizing/readout-noise sweep
-   strengthens it further. Without this, a quantum venue will not credit the scalability narrative.
+3. **Finite-shot / noise analysis (🔴–🟠) — ✅ shot part DONE.** The distinctive claim is
+   "hardware-native, O(K), scalable measurement readout." The finite-shot simulation
+   (`make_shots.py`, docs/06 §B.7) now backs it: the structured−scrambled bias is **shot-invariant
+   down to 32 shots per observable** (ΔAUC +0.0184, 100% of realizations positive), because the bias
+   is a difference (symmetric noise cancels) over low-variance pooled correlators. **Still open:** a
+   *device-noise* sweep (depolarizing / readout error via PennyLane `default.mixed`) to complete the
+   hardware-realism story for a quantum venue.
 
 ---
 
@@ -107,7 +109,7 @@ scalable" selling point that is currently statevector-only. These three are the 
 |--:|--------|--------|:--:|:--:|
 | 1 | Parameter-match the coarse-graph classical control; run structured-vs-scrambled-A on it | core-claim hole | 🔴 | L |
 | 2 | Re-run Level 8 at K∈{4,6,8} with **5 seeds**; bootstrap CI per cell | power, K=8 n=1 | 🔴 | M |
-| 3 | Finite-shot simulation of the correlator readout (bias-vs-shots curve) | scalability claim | 🔴 | M |
+| 3 | ✅ ~~Finite-shot simulation~~ DONE (`make_shots.py`); remaining: device-noise sweep | scalability claim | 🟠 | M |
 | 4 | Second dataset/task family; replicate the fade-vs-grow pattern | external validity | 🔴 | M–H |
 | 5 | Learning-curve / sample-efficiency experiment (already in progress) | "is it really a bias?" | 🟠 | L–M |
 | 6 | Formal lemma: why bond-correlator readout preserves graph signal single-qubit loses | theory depth | 🟠 | M |
