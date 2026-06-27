@@ -323,6 +323,22 @@ python make_figdata.py --folds 3 --seeds 0 1 --epochs 18
 | Reduced-fidelity reproduction harness | `make_figdata.py` → `results/figdata/` |
 | Coarse-graph caches | `data/bias_coarse_K{4,6,8}.npz` |
 | Raw run logs (headline numbers) | `_levelG_k{4,6,8}.log`, `_sweep.log` |
+| Formal scaling lemma support / mechanism | `make_mechanism.py`, `make_shots.py` |
+| Effect sizes / power / Holm | `make_stats.py` |
+
+### 8.5 Data & code availability
+
+- **Code.** All experiment, figure and statistics scripts are in this repository
+  (`run_bias_probe.py`, `run_levelG_probe.py`, `_verify_absorb.py`, `make_*.py`, `report_data.py`,
+  `src/`). The pinned environment is `requirements.txt` (Python 3.12.10, CPU-only); no GPU or quantum
+  hardware is required. Before archival submission, tag a release and deposit a snapshot (e.g.
+  Zenodo) for a citable DOI.
+- **Data.** Tox21 and ToxCast are public (PyG `MoleculeNet`; Tox21 also via `EDA_dataset.csv`). The
+  derived coarse-graph tensors are regenerated deterministically into `data/bias_coarse_K*.npz` by
+  `run_bias_probe.featurize` (spectral clustering `random_state=0`); they are caches, not primary
+  data, and are `.gitignore`d.
+- **Determinism.** Seeds are fixed throughout (§8.2); the only nondeterminism is BLAS float-reduction
+  order. Every reported number traces through `report_data.py` to a named run log.
 
 ---
 

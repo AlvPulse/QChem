@@ -42,6 +42,16 @@ def boot_ci(d, B=5000, seed=0):
     return float(np.percentile(meds, 2.5)), float(np.percentile(meds, 97.5))
 
 
+def min_detectable(d, power=0.80, alpha=0.05):
+    """Min detectable mean per-task ΔAUC for a one-sided paired test at the given power.
+    z-approximation: δ = (z_{1-α} + z_{power}) · SD / √n (Wilcoxon ARE ≈ 0.955, so comparable)."""
+    from scipy.stats import norm
+    d = d[~np.isnan(d)]
+    sd = float(np.std(d, ddof=1)); n = len(d)
+    z = norm.ppf(1 - alpha) + norm.ppf(power)
+    return z * sd / np.sqrt(n), sd, n
+
+
 def main():
     pub_p = np.array([R.DECOMP[c]["wil_p"] for c in CELLS])
     adj = holm(pub_p)
@@ -81,6 +91,19 @@ def main():
               f"95% CI [{v['ci'][0]:+.4f}, {v['ci'][1]:+.4f}]  ({v['npos']}/{v['n']} pos)")
     print(f"\nrandom-split published 95% CI (gate K4): "
           f"[{R.RANDSPLIT['ci95'][0]:+.4f}, {R.RANDSPLIT['ci95'][1]:+.4f}]")
+
+    # power analysis from the levelG K6 per-task deltas
+    try:
+        z = np.load("results/figdata/levelG_K6.npz")
+        dmin, sd, n = min_detectable(z["auc_s"] - z["auc_c"])
+        out["power"] = dict(min_detectable_dauc=dmin, per_task_sd=sd, n=n)
+        with open("results/stats_summary.json", "w") as f:
+            json.dump(out, f, indent=2)
+        print(f"\n== Power (n={n} paired tasks, SD={sd:.4f}) ==")
+        print(f"min detectable mean dAUC @80% power (1-sided a=0.05): {dmin:.4f}")
+        print(f"  -> Level-8 effects (0.0078-0.0134) clear it; gate-only (0.0026-0.0030) do not.")
+    except FileNotFoundError:
+        pass
 
 
 if __name__ == "__main__":

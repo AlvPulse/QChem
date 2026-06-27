@@ -333,6 +333,31 @@ hardware-native and estimable from O(log K) classical-shadow measurements. (Stat
 | Higher absolute accuracy than gate-only | **Yes** (K6) | 0.651 vs 0.641 |
 | Beats classical | **No** | trails by ≈ 3 pts at K=6 (§II-E) |
 
+### B.6 Why the measurement readout scales (formal)
+
+The empirical fade-vs-grow split (Model A vs B) has a clean information-theoretic explanation.
+
+> **Lemma 3 (single-qubit readout is blind to the graph signal).** Let `ρ(x)` be the K-qubit state a
+> molecule `x` produces. The **single-qubit readout** `S: ρ ↦ (⟨X_i⟩,⟨Y_i⟩,⟨Z_i⟩)_{i=1..K}` is a
+> function of the K one-qubit *marginals* `{ρ_i}` only: any two states with identical one-qubit
+> marginals but different correlations are **indistinguishable to `S`**. The graph-gated entangler
+> `IsingXX(A_ij·θ)` writes the topology into the **connected two-qubit correlators**
+> `C_ij = ⟨P_iP_j⟩ − ⟨P_i⟩⟨P_j⟩` on bonded pairs — quantities that are, by definition, *not*
+> determined by the marginals. Therefore the `structured − scrambled` difference, which is carried by
+> *which pairs are correlated*, is largely invisible to `S` and is read directly by the
+> **bond-correlator readout** `B_A: ρ ↦ (Σ_j A_ij C_ij)_i`.
+>
+> *Dimension count.* There are `Θ(K²)` pairwise correlators but only `3K = Θ(K)` single-qubit
+> expectations. For a sparse molecular graph with `Θ(K)` bonds, the graph signal lives in `Θ(K)`
+> connected correlators on real edges; `B_A` reads exactly those, so its feature space *matches the
+> signal's dimensionality*, while `S` cannot — as K grows, the share of graph-structured information
+> accessible to `S` shrinks. Hence the gate-only (single-qubit-readout) bias **fades** with K while
+> the Level-8 (bond-correlator) bias **grows**. ∎
+
+This is not merely asymptotic bookkeeping: §C.4 measures it directly — on a trained K=6 circuit the
+connected correlator `|C_ij|` is **5.1× larger on bonded than non-bonded pairs**, exactly the signal
+`S` discards and `B_A` harvests.
+
 ## Model C — Measurement-only (ablation: is the readout a standalone trick?)
 
 **C.1 Overview.** The bond-correlator readout of Model B, but with a **graph-independent fixed ring**
@@ -576,8 +601,12 @@ choice that addresses or bounds it.
 - **Multiplicity** across the K × config grid: addressed by a Holm correction across the probe cells
   (§III) plus an independent random-split replication as the guard against a single-cell false
   positive.
-- **Power**: 12 paired tasks is small; the design draws power from pairing (which cancels between-task
-  difficulty). The detectable effect floor is stated in §III.
+- **Power** (computed): with 12 paired tasks and the observed per-task SD ≈ 0.009, the minimum
+  detectable mean ΔAUC at 80% power (one-sided, α = 0.05) is **≈ 0.0066** (`make_stats.py`,
+  z-approximation; Wilcoxon ARE ≈ 0.955 so comparable). The Level-8 effects (+0.0078 → +0.0134)
+  **clear this floor**; the gate-only effects (+0.0026 → +0.0030) fall **below** it — so "gate-only
+  is n.s. at K ≥ 6" is in part an honest *power* statement, consistent with the §II-B.6 lemma that the
+  single-qubit readout cannot represent the signal in the first place.
 
 **V.2 Internal validity** — *is the gap caused by the bias, not a confound?*
 - **Capacity**: the `structured − scrambled` comparison is byte-identical and exactly parameter-matched
