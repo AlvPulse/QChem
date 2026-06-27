@@ -358,7 +358,7 @@ This is not merely asymptotic bookkeeping: §C.4 measures it directly — on a t
 connected correlator `|C_ij|` is **5.1× larger on bonded than non-bonded pairs**, exactly the signal
 `S` discards and `B_A` harvests.
 
-### B.7 Finite-shot robustness — the readout survives real measurement
+### B.7 Finite-shot and device-noise robustness — the readout survives real measurement
 
 The O(K) readout (§B.4) is only useful on hardware if the bias survives estimating the observables
 from a finite number of **measurement shots** rather than the exact statevector. We test this
@@ -379,6 +379,20 @@ exact ΔAUC +0.018 sits at the high end of the K=6 range — the shot-invariance
 magnitude, is the result.)*
 
 ![Finite-shot robustness of the bond-correlator readout](figures/fig15_shots.png)
+
+**Device noise.** A complementary stress test (`make_noise.py`) models Pauli-twirled local
+depolarizing noise of per-qubit strength `p`, under which a weight-`w` Pauli expectation is
+attenuated by `(1−p)^w` — so the **2-local bond-correlators decay as `(1−p)²`, the worst case** for
+Level 8's signal — plus a fixed 2% readout bit-flip error. The bias is again robust: across
+`p = 0 → 20%` it moves only **+0.0182 → +0.0168** (absolute structured AUC flat to three decimals).
+Same mechanism: the bias is a structured−scrambled *difference* over low-variance bond-pooled
+aggregates, so multiplicative decoherence rescales both arms together and largely cancels. Together,
+shots and noise show the O(K) readout is robust to **both** failure modes a hardware reviewer asks
+about — finite sampling and device decoherence. *(Analytic Pauli-attenuation model — exact for global
+depolarizing; a gate-level `default.mixed` simulation is the natural next step for stronger device
+realism.)*
+
+![Device-noise robustness of the bond-correlator readout](figures/fig16_noise.png)
 
 ## Model C — Measurement-only (ablation: is the readout a standalone trick?)
 
@@ -723,6 +737,7 @@ python make_mechanism.py      # mechanism figure      python make_stats.py      
 | `fig13_control_decision.png` | Control-validity decision diagram (Prop. 1) |
 | `fig14_mechanism.png` | Measured correlation localization (place-then-harvest) |
 | `fig15_shots.png` | Finite-shot robustness — bias survives down to 32 shots/observable |
+| `fig16_noise.png` | Device-noise robustness — bias survives depolarizing + readout error |
 
 ---
 

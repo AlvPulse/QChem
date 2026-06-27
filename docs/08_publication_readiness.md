@@ -18,9 +18,9 @@ journal** it was missing three things, in priority order: **(1) external validit
 dataset is disqualifying on its own — *still open*), **(2) a parameter-matched classical control on
 the coarse graph** (without it the "inductive bias, not capacity" claim has a hole — *in progress
 separately*), and **(3) a finite-shot / noise analysis** to substantiate the "hardware-native, O(K),
-scalable" selling point (*shot part ✅ done — §B.7/`make_shots.py`; device-noise sweep still open*).
-Closing (1) is now the single remaining gate to a top venue; (3)'s shot result and the theory/power/
-artifact additions (Lemma 3, computed power, `requirements.txt`) are already in.
+scalable" selling point (*✅ done — §B.7: finite-shot `make_shots.py` + device-noise `make_noise.py`*).
+Closing (1) is now the single remaining gate to a top venue; (3) is fully addressed, and the theory/
+power/artifact additions (Lemma 3, computed power, `requirements.txt`) are already in.
 
 ---
 
@@ -97,9 +97,10 @@ artifact additions (Lemma 3, computed power, `requirements.txt`) are already in.
    "hardware-native, O(K), scalable measurement readout." The finite-shot simulation
    (`make_shots.py`, docs/06 §B.7) now backs it: the structured−scrambled bias is **shot-invariant
    down to 32 shots per observable** (ΔAUC +0.0184, 100% of realizations positive), because the bias
-   is a difference (symmetric noise cancels) over low-variance pooled correlators. **Still open:** a
-   *device-noise* sweep (depolarizing / readout error via PennyLane `default.mixed`) to complete the
-   hardware-realism story for a quantum venue.
+   is a difference (symmetric noise cancels) over low-variance pooled correlators. The **device-noise
+   sweep is also done** (`make_noise.py`, fig16): Pauli-twirled depolarizing with the 2-local readout
+   decaying as `(1−p)²` plus 2% readout error leaves the bias flat (+0.0182→+0.0168) across
+   `p = 0→20%`. A gate-level `default.mixed` simulation is the optional next step for maximal realism.
 
 ---
 
@@ -109,7 +110,7 @@ artifact additions (Lemma 3, computed power, `requirements.txt`) are already in.
 |--:|--------|--------|:--:|:--:|
 | 1 | Parameter-match the coarse-graph classical control; run structured-vs-scrambled-A on it | core-claim hole | 🔴 | L |
 | 2 | Re-run Level 8 at K∈{4,6,8} with **5 seeds**; bootstrap CI per cell | power, K=8 n=1 | 🔴 | M |
-| 3 | ✅ ~~Finite-shot simulation~~ DONE (`make_shots.py`); remaining: device-noise sweep | scalability claim | 🟠 | M |
+| 3 | ✅ DONE — finite-shot (`make_shots.py`) + device-noise (`make_noise.py`) | scalability claim | ✅ | — |
 | 4 | Second dataset/task family; replicate the fade-vs-grow pattern | external validity | 🔴 | M–H |
 | 5 | Learning-curve / sample-efficiency experiment (already in progress) | "is it really a bias?" | 🟠 | L–M |
 | 6 | Formal lemma: why bond-correlator readout preserves graph signal single-qubit loses | theory depth | 🟠 | M |
