@@ -95,7 +95,11 @@ seven abstract levels' `structured − scrambled` is vacuous at L1/2/4). Numbers
 sourced module (`report_data.py`); figures from `make_figures.py` → `docs/figures/`; an optional
 reduced-fidelity corroboration harness is `make_figdata.py`. Implementation/methods (data
 re-uploading, graph-gated entangler, bond-correlator readout, control definitions, training regime)
-are in [`docs/07_technical_implementation.md`](docs/07_technical_implementation.md).
+are in [`docs/07_technical_implementation.md`](docs/07_technical_implementation.md). The
+publication-readiness gap audit is [`docs/08_publication_readiness.md`](docs/08_publication_readiness.md),
+and the robustness/mechanism/theory **extension results** (K=8, finite-shot, device-noise, mechanism,
+representation probing, scaling lemma, power) are consolidated in
+[`docs/09_extension_results.md`](docs/09_extension_results.md).
 
 ## Full Benchmark Suite
 
