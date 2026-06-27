@@ -56,7 +56,13 @@ DECOMP = {
                            sign_p=0.073,  wil_p=0.0105,  run_deltas=[0.0165, 0.0069, 0.0066]),
     ("gate", 8):      dict(struct=0.6579, scram=0.6557, median_dauc=+0.0030, npos=7, n=12,
                            sign_p=0.3872, wil_p=0.1697,  run_deltas=[-0.0003, 0.0046]),
-    # levelG K=8 deliberately absent: confirmation run deferred (docs/05 sec.6.2 note).
+    # Level 8 K=8 confirmation (_levelG_k8_final.log, 1 seed): bias GROWS and gets MORE significant
+    # with K -> dAUC +0.0078(K4) -> +0.0108(K6) -> +0.0134(K8); Wilcoxon p 0.017 -> 0.011 -> 0.0024.
+    # (Matched 1-seed gate at K=8 in that same run was +0.0015, p=0.52 -- also n.s.)
+    ("levelG", 8):    dict(struct=0.6483, scram=0.6328, median_dauc=+0.0134, npos=10, n=12,
+                           sign_p=0.01929, wil_p=0.002441, run_deltas=[0.0155]),
+    # Level 8 bias GROWS and gets MORE significant with K: dAUC +0.0078(K4) -> +0.0108(K6) ->
+    # +0.0134(K8); Wilcoxon p 0.017 -> 0.011 -> 0.0024. SOURCE: _levelG_k8_final.log (1 seed).
 }
 
 # ---------------------------------------------------------------------------

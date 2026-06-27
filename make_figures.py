@@ -65,7 +65,7 @@ def fig_bias_vs_qubits():
                         ha="center", fontsize=8.5, color=C[cfg])
     ax.axhline(0, color=C["zero"], lw=1, ls="--", alpha=0.7)
     ax.set_xticks([4, 6, 8])
-    ax.set_ylim(-0.0016, 0.0132)
+    ax.set_ylim(-0.0016, 0.0162)
     ax.set_xlabel("Qubits K  (=  coarse graph nodes)")
     ax.set_ylabel("Median per-task ΔAUC  (structured − scrambled)")
     ax.set_title("Quantum topology bias vs circuit size")
@@ -125,7 +125,8 @@ def fig_absolute_ordering():
 
 def fig_forest():
     """Forest plot: median ΔAUC per (config,K) with run-level min/max whiskers."""
-    rows = [("gate", 4), ("gate", 6), ("gate", 8), ("levelG", 4), ("levelG", 6), ("meas_only", 4)]
+    rows = [("gate", 4), ("gate", 6), ("gate", 8), ("levelG", 4), ("levelG", 6), ("levelG", 8),
+            ("meas_only", 4)]
     labels, meds, los, his, cols = [], [], [], [], []
     for c, k in rows:
         d = R.DECOMP[(c, k)]

@@ -10,7 +10,8 @@ Outputs results/stats_summary.json and prints a markdown-ready table.
 import json, numpy as np
 import report_data as R
 
-CELLS = [("gate", 4), ("gate", 6), ("gate", 8), ("levelG", 4), ("levelG", 6), ("meas_only", 4)]
+CELLS = [("gate", 4), ("gate", 6), ("gate", 8), ("levelG", 4), ("levelG", 6), ("levelG", 8),
+         ("meas_only", 4)]
 
 
 def holm(pvals):
@@ -69,7 +70,7 @@ def main():
     with open("results/stats_summary.json", "w") as f:
         json.dump(out, f, indent=2)
 
-    print("\n== Holm-adjusted across the 6 probe cells ==")
+    print(f"\n== Holm-adjusted across the {len(CELLS)} probe cells ==")
     print(f"{'cell':<12} {'med_dAUC':>9} {'pos':>5} {'Wilcoxon':>9} {'Holm':>9}")
     for r in rows:
         print(f"{r['cell']:<12} {r['median_dauc']:>+9.4f} {r['npos']:>3}/12 "

@@ -295,18 +295,26 @@ quantum correlations on the true bonds; the readout *harvests* them along the sa
 quantum, permutation-invariant graph readout — the direct analogue of a GNN's neighbourhood
 aggregation, but with genuine two-qubit correlators as messages.
 
-**B.2 Performance and the bias.** (Source: `_levelG_k{4,6}.log`.)
+**B.2 Performance and the bias.** (Source: `_levelG_k{4,6}.log`, `_levelG_k8_final.log`.)
 
 | K | struct AUC | scram AUC | median ΔAUC | tasks + | sign p | **Wilcoxon p** | run-level ΔAUC (per seed) |
 |--:|-----------:|----------:|------------:|:-------:|:------:|:--------------:|---------------------------|
 | 4 | 0.6415 | 0.6326 | **+0.0078** | 8/12 | 0.194 | **0.017 \*** | +0.0089 [0.0163, 0.0016] |
 | 6 | 0.6512 | 0.6412 | **+0.0108** | 9/12 | 0.073 | **0.011 \*** | +0.0100 [0.0165, 0.0069, 0.0066] |
+| 8 | 0.6483 | 0.6328 | **+0.0134** | 10/12 | 0.019 | **0.0024 \*\*** | +0.0155 [0.0155] ¹ |
+
+¹ K=8 is a single seed (reproduced run-level +0.0155 in an independent re-run); the Wilcoxon is the
+within-run paired test over the 12 tasks.
 
 **B.3 Scaling — the success (the central result).** Where Model A's gate-only bias *dies* by K=6,
-Model B's bias is **larger at K=6 than at K=4** (+0.0108 vs +0.0078), remains significant
-(p = 0.011), is **positive across all three K=6 seeds**, *and* posts a **higher absolute AUC**
-(0.651 vs gate's 0.641). More qubits → more bonds → a richer graph readout: the measurement
-mechanism turns added capacity into added **signal** rather than added noise.
+Model B's bias **grows monotonically with circuit size** — median ΔAUC **+0.0078 → +0.0108 →
++0.0134** at K = 4 → 6 → 8 — and gets *more* significant, not less: **Wilcoxon p 0.017 → 0.011 →
+0.0024**, with 8/12, 9/12, **10/12** tasks favouring structured. At K=6 it is positive across all
+three seeds; at K=8 (single seed, reproduced) it reaches its largest effect, and — decisively — its
+**Holm-adjusted p = 0.017 survives a strict seven-way multiplicity correction** (Table III.2) where
+no other cell does. More qubits → more bonds → a richer graph readout: the measurement mechanism
+turns added capacity into added **signal**, the exact opposite of the gate-only mechanism. This
+divergence (Fig. 1) is the chapter's central result.
 
 ![Bias vs circuit size](figures/fig01_bias_vs_qubits.png)
 
@@ -320,8 +328,8 @@ hardware-native and estimable from O(log K) classical-shadow measurements. (Stat
 | Claim | Verdict | Evidence |
 |-------|:------:|----------|
 | Bias exists & is non-absorbable | **Yes** | data-gated `A` upstream of the only trainable layer (proof `docs/05` §5) |
-| **Scales with qubits** | **Yes** | +0.0078 (K4) → +0.0108 (K6); p stays < 0.05; all K6 seeds + |
-| Readout adds over gates alone | **Yes** | B > A at both K (Δ roughly doubles); see Model C |
+| **Scales with qubits** | **Yes** | ΔAUC +0.0078→+0.0108→+0.0134 (K4→6→8); p 0.017→0.011→0.0024; K8 survives 7-way Holm |
+| Readout adds over gates alone | **Yes** | B > A at every K (Δ roughly doubles, and diverges as gate fades); see Model C |
 | Higher absolute accuracy than gate-only | **Yes** (K6) | 0.651 vs 0.641 |
 | Beats classical | **No** | trails by ≈ 3 pts at K=6 (§II-E) |
 
@@ -397,7 +405,7 @@ how far the quantum models are from a strong classical model on the *same coarse
 |--:|--------------:|----------------------:|:--------------:|
 | 4 | 0.7201 | 0.6457 (A) / 0.6415 (B) | +7.4 / +7.9 pts |
 | 6 | 0.6817 | 0.6391 (A) / 0.6512 (B) | +4.3 / +3.1 pts |
-| 8 | 0.7096 | 0.6551 (A) | +5.5 pts |
+| 8 | 0.7096 | 0.6551 (A) / 0.6483 (B) | +5.5 / +6.1 pts |
 
 ![Classical gap across scale](figures/fig07_classical_gap.png)
 
@@ -418,7 +426,7 @@ question; absolute AUC at the K of best evidence.)
 | Model | Best ΔAUC (K) | Significant? | Scales? | Non-absorbable? | Capacity-matched bias? | Abs. AUC | Beats classical? |
 |-------|:-------------:|:-----------:|:------:|:---------------:|:----------------------:|:--------:|:---------------:|
 | A Gate-gated | +0.0044 (K4) | ✓ K4 only | **✗** | ✓ | ✓ | 0.646 | ✗ |
-| **B Level 8** | **+0.0108 (K6)** | **✓ K4 & K6** | **✓** | ✓ | ✓ | 0.651 | ✗ |
+| **B Level 8** | **+0.0134 (K8)** | **✓ K4/6/8 (K8 clears Holm)** | **✓ (monotone)** | ✓ | ✓ | 0.651 | ✗ |
 | C Meas-only | −0.0271 (K4) | ✗ (worse) | — | ✓ | ✓ | 0.607 | ✗ |
 | D Separable | — | — | ✗ (loses to nothing) | n/a | n/a | 0.652–0.670 | ✗ |
 | E Classical | — | — | — | n/a | **✗ (~10× params)** | 0.682–0.720 | — |
@@ -452,7 +460,7 @@ the tables above.
 
 **Table III.2 — Effect sizes and multiplicity control** (`make_stats.py`).
 
-*Holm–Bonferroni across the six probe cells (published Wilcoxon p):*
+*Holm–Bonferroni across the seven probe cells (published Wilcoxon p):*
 
 | Cell | median ΔAUC | tasks + | Wilcoxon p | Holm-adj p |
 |------|:-----------:|:-------:|:----------:|:----------:|
@@ -460,7 +468,8 @@ the tables above.
 | gate K6 | +0.0026 | 9/12 | 0.133 | 0.399 |
 | gate K8 | +0.0030 | 7/12 | 0.170 | 0.399 |
 | levelG K4 | +0.0078 | 8/12 | 0.017 | 0.085 |
-| **levelG K6** | **+0.0108** | 9/12 | **0.011** | **0.063** |
+| levelG K6 | +0.0108 | 9/12 | 0.011 | 0.063 |
+| **levelG K8** | **+0.0134** | 10/12 | **0.0024** | **0.017 \*** |
 | meas_only K4 | −0.0271 | 0/12 | 1.0 | 1.0 |
 
 *Effect sizes with 95% CIs (rank-biserial = matched-pairs Wilcoxon effect size):*
@@ -471,18 +480,18 @@ the tables above.
 | gate K4 (reproduction) | +0.51 | +0.0028 | [−0.0008, +0.0060] | 9/12 |
 | gate K4 (random-split, published) | — | +0.0042 | **[+0.0013, +0.0071]** | 13/15 seeds |
 
-**Reading.** Each cell is per-cell significant (p = 0.011–0.017), but under a strict six-way Holm
-correction **none clears α = 0.05** — the strongest, Level-8 K=6, lands at a *borderline* 0.063. Two
-points keep the conclusion honest rather than either over- or under-claiming. (i) The Holm family is
-*conservative by design*: it includes three cells we **predict** to be null (gate K6/K8 and the
-`meas_only` negative control), and padding a family with predicted-nulls inflates the correction
-against the genuine effects. (ii) The effect's support does **not** rest on a single corrected
-p-value: it is **directionally consistent across two independent regimes** (the random-split 95% CI
-[+0.0013, +0.0071] excludes 0), carries a **large effect size** at the headline cell (rank-biserial
-+0.95, 11/12 tasks, bootstrap CI excluding 0), and is **mechanistically grounded** (§C.4). The
-defensible claim is therefore: *a small effect, per-cell significant and borderline under
-conservative multiplicity, robustly directional across regimes and backed by a measured mechanism* —
-not "p < 0.05 after correction."
+**Reading.** The Level-8 bias strengthens with circuit size: per-task Wilcoxon p = 0.017 (K4),
+0.011 (K6), **0.0024 (K8)**. Under a strict Holm correction over all seven measured cells
+(gate K4/6/8, levelG K4/6/8, the `meas_only` control), the **strongest cell — Level-8 K=8 — now
+clears α = 0.05** (adjusted p = 0.0024 × 7 ≈ **0.017**); Level-8 K=6 follows at a borderline 0.063.
+So the effect survives conservative multiplicity at the largest circuit, and the support does **not**
+rest on that single corrected p-value either: it is **directionally consistent across two independent
+regimes** (the random-split 95% CI [+0.0013, +0.0071] excludes 0), **grows monotonically with K**
+(+0.0078 → +0.0108 → +0.0134), carries a **large effect size** at the headline cells (rank-biserial
++0.95, bootstrap CI excluding 0), and is **mechanistically grounded** (§C.4). The defensible claim
+is therefore: *a small effect that is per-cell significant at every K, clears conservative
+multiplicity at K=8, grows with circuit size, is robustly directional across regimes, and is backed
+by a measured mechanism* — while remaining far from classically competitive (§III.a).
 
 ## III.b Learning behaviour and pooled diagnostics (illustrative)
 
@@ -529,7 +538,7 @@ only.
 | Does it survive scaffold (OOD) evaluation? | **Yes** | Strong | underpowered at K≥6 for Model A |
 | Does it survive parameter matching? | **Yes** (vs scrambled) | Strong | classical comparison is *not* matched, by design |
 | Does the **gate** mechanism scale? | **No** | Strong | n.s. by K=6; seeds flip sign |
-| Does the **measurement** mechanism (Level 8) scale? | **Yes** | Moderate→Strong | K=8 confirmation deferred; K=6 = 3 seeds |
+| Does the **measurement** mechanism (Level 8) scale? | **Yes** | **Strong** | grows K4→6→8: ΔAUC +0.0078→+0.0108→+0.0134, p 0.017→0.011→0.0024 |
 | Is the readout indispensable (vs measurement alone)? | **Yes — readout needs graph-gated gates** | Strong | meas-only is 0/12, ΔAUC −0.027 |
 | Does entanglement *per se* help accuracy? | **No** | Moderate | separable ties/wins at high K |
 | Could a classical model explain the same gains? | classical is **ahead on accuracy**, but on ≈10× params; it does **not** explain the matched `struct−scram` gap | Moderate | a param-matched classical on coarse graphs untested |
@@ -541,13 +550,15 @@ two-qubit correlators (Level 8) makes it *grow* with circuit size and stay signi
 gate-routing dies. (3) The readout amplifies but does not create the bias (meas-only control), and
 the **place-then-harvest mechanism is directly measured** — correlation is 5.1× concentrated on true
 bonds and true-A pooling harvests 2.3× more than random-A (§C.4). (4) The project's original
-benchmark control is provably vacuous at Levels 1/2/4. *(Significance caveat: per-cell p∈[0.011,0.017]
-is borderline under conservative six-way Holm — Table III.2 — so the claims lean on cross-regime
-consistency, effect size, and mechanism, not a single corrected p-value.)*
+benchmark control is provably vacuous at Levels 1/2/4. *(Significance note: per-cell p ∈ [0.0024, 0.017]
+across K; the strongest cell, Level-8 K=8, **clears conservative seven-way Holm** at adjusted
+p ≈ 0.017 — Table III.2 — and the claim is further backed by cross-regime consistency, monotonic
+growth, effect size, and mechanism.)*
 
-**Partially supported.** Level 8's *scaling* rests on two completed K-points (K=4, K=6) plus the
-mechanistic decomposition; the K=8 confirmation is deferred (slow correlator readout). The trend is
-consistent but the high-K cells deserve more seeds.
+**Fully supported (all three K-points).** Level 8's *scaling* now rests on three completed K-points —
+K=4 (+0.0078, p=0.017), K=6 (+0.0108, p=0.011), K=8 (+0.0134, p=0.0024) — plus the mechanistic
+decomposition. The bias grows monotonically with circuit size; K=8 used 1 seed (the per-task paired
+test over 12 tasks still has power), so tighter intervals there would benefit from more seeds.
 
 **Not supported / open.** The bias is **not** a performance advantage over classical at this scale;
 entanglement *per se* does not raise accuracy; generalisation beyond the 12 Tox21 assays is untested.
@@ -591,7 +602,7 @@ choice that addresses or bounds it.
 **V.4 External validity** — *how far does it generalise?*
 - **One dataset / task family** (Tox21, 12 assays) — the single biggest limitation; a second endpoint
   family is the top future experiment.
-- **High-K under-powered**: K=6 used 2–3 seeds, K=8 fewer, and the Level-8 K=8 cell is unfilled.
+- **High-K uses fewer seeds**: K=4 used 2, K=6 used 3, K=8 used 1 (the per-task paired test over 12 tasks retains power, but tighter K=8 intervals would benefit from more seeds). All three Level-8 K-cells are now filled.
   "No evidence the gate bias scales" is not "proof it is zero" at high K.
 - **Not a performance claim**: an unconstrained classical MLP leads everywhere; the contribution is
   bias *existence and scaling*, deliberately separated from quantum advantage.

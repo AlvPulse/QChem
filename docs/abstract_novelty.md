@@ -1,7 +1,8 @@
 # Ready-to-Paste Abstract & Novelty Statements
 
 Drop-in text for the project report. Three lengths are provided; pick per venue. Numbers reflect
-the completed K=4 and K=6 scaffold-CV results (K=8 Level-8 confirmation pending).
+the completed K=4, K=6 and K=8 scaffold-CV results (the Level-8 bias grows monotonically across all
+three).
 
 ---
 
@@ -51,7 +52,9 @@ first demonstration here of an inductive-bias mechanism that scales with qubit c
   (K = 4, 6, 8); genuine only at Levels 5–7 (residual 1.3–1.6).
 - Topology bias (structured − scrambled), per-task paired Wilcoxon on pooled scaffold-CV predictions:
   - gate-only: K4 +0.0044 (p=0.017) → K6 +0.0026 (n.s.) → K8 +0.0030 (n.s.) — **fades**.
-  - Level 8: K4 +0.0078 (p=0.017) → K6 **+0.0108 (p=0.011)**, higher absolute AUC — **grows**.
+  - Level 8: K4 +0.0078 (p=0.017) → K6 +0.0108 (p=0.011) → K8 **+0.0134 (p=0.0024)** — **grows**
+    monotonically and gets *more* significant; K=8 survives a strict seven-way Holm correction
+    (adjusted p ≈ 0.017).
   - replication: 15-seed random split, 13/15 seeds, sign p=0.0037, Wilcoxon p=0.0062.
 - Honesty caveat to include: a capacity-unconstrained classical MLP still leads by ~5–8 AUC points;
   this is an inductive-bias *existence-and-scaling* result, not a quantum-advantage claim.

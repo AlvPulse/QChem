@@ -129,18 +129,17 @@ correlation it harvests (non-absorbable); the readout is O(K) for sparse graphs 
 Paulis are hardware-native (scalable). Three configs, each `structured` (true A) vs `scrambled`
 (random A), scaffold CV, pooled per-task Wilcoxon:
 
-| config | entangler | readout | K=4 median dAUC (Wilcoxon p) | K=6 median dAUC (Wilcoxon p) |
-|---|---|---|---|---|
-| `gate` | graph-gated | single-qubit | +0.0044 (0.017) | +0.0026 (**0.13, n.s.**) |
-| `levelG` | graph-gated | + bond-correlators | +0.0078 (0.017) | **+0.0108 (0.0105)** |
-| `meas_only` | fixed ring | bond-correlators | −0.027 (1.0) | — |
+| config | entangler | readout | K=4 (Wilcoxon p) | K=6 (Wilcoxon p) | K=8 (Wilcoxon p) |
+|---|---|---|---|---|---|
+| `gate` | graph-gated | single-qubit | +0.0044 (0.017) | +0.0026 (**0.13 n.s.**) | +0.0030 (**0.17 n.s.**) |
+| `levelG` | graph-gated | + bond-correlators | +0.0078 (0.017) | **+0.0108 (0.011)** | **+0.0134 (0.0024)** |
+| `meas_only` | fixed ring | bond-correlators | −0.027 (1.0) | — | — |
 
 Two findings:
 1. **Measurement readout makes the bias scale.** Gate-gating *fades* with K (K4 +0.0044 → K6
-   +0.0026 n.s. → K8 +0.0030 n.s.); Level G *grows* and stays significant (K4 +0.0078 → K6
-   +0.0108, p=0.0105), with all 3 K=6 seeds positive and **higher** absolute ROC (0.651 vs 0.641).
-   _(Level G K=8 confirmation queued — slow readout + a transient inability to host background jobs;
-   the scaling claim rests on the completed K4/K6 points plus the decomposition below.)_
+   +0.0026 n.s. → K8 +0.0030 n.s.); Level G *grows monotonically and gets MORE significant*
+   (K4 +0.0078 p=0.017 → K6 +0.0108 p=0.011 → K8 **+0.0134 p=0.0024**, 10/12 tasks positive). The
+   bias roughly doubles from K=4 to K=8 while the gate-only mechanism dies.
 2. **The readout is an amplifier, not a standalone mechanism.** With a graph-independent ring
    entangler (`meas_only`), bond-pooling the *true* adjacency does *worse* than random
    (−0.027, 0/12 tasks positive): the correlations sit on ring edges, not molecular bonds, so
