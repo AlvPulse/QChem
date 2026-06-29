@@ -43,26 +43,33 @@ ABSORB = {
 #            run_deltas (per-seed run-level dAUC).
 #    SOURCE: _levelG_k4.log, _levelG_k6.log, _levelG_k8.log (run_levelG_probe.py)
 # ---------------------------------------------------------------------------
+# SEED-COUNT WARNING: the K=4 cells are now 5-seed (corrected); the earlier 2-seed K=4 levelG
+# +0.0078 (p=0.017) was a FAVOURABLE-SEED ARTIFACT (seed 2 run-delta is -0.028) -> 5-seed value is
+# -0.0008 (n.s.). Seed counts differ across K (K4=5, K6=3, K8=1/2) -- noted per cell as `seeds`.
+# Honest summary: the topology bias is SUBSTRATE-INDEPENDENT (appears in quantum AND classical) and
+# GROWS with the number of coarse-graph nodes K; it is n.s. at K=4 for all models and becomes
+# robust by K=8 (classicalGNN K=8: +0.0109, 12/12 tasks, p=2.4e-4 over 5 seeds).
 DECOMP = {
-    ("gate", 4):      dict(struct=0.6457, scram=0.6404, median_dauc=+0.0044, npos=9, n=12,
-                           sign_p=0.073,  wil_p=0.01709, run_deltas=[0.0049, 0.0057]),
-    ("levelG", 4):    dict(struct=0.6415, scram=0.6326, median_dauc=+0.0078, npos=8, n=12,
-                           sign_p=0.1938, wil_p=0.01709, run_deltas=[0.0163, 0.0016]),
-    ("meas_only", 4): dict(struct=0.6072, scram=0.6337, median_dauc=-0.0271, npos=0, n=12,
-                           sign_p=1.0,    wil_p=1.0,     run_deltas=[-0.0091, -0.0438]),
-    ("gate", 6):      dict(struct=0.6409, scram=0.6379, median_dauc=+0.0026, npos=9, n=12,
-                           sign_p=0.073,  wil_p=0.1331,  run_deltas=[0.012, -0.003, -0.0001]),
-    ("levelG", 6):    dict(struct=0.6512, scram=0.6412, median_dauc=+0.0108, npos=9, n=12,
-                           sign_p=0.073,  wil_p=0.0105,  run_deltas=[0.0165, 0.0069, 0.0066]),
-    ("gate", 8):      dict(struct=0.6579, scram=0.6557, median_dauc=+0.0030, npos=7, n=12,
-                           sign_p=0.3872, wil_p=0.1697,  run_deltas=[-0.0003, 0.0046]),
-    # Level 8 K=8 confirmation (_levelG_k8_final.log, 1 seed): bias GROWS and gets MORE significant
-    # with K -> dAUC +0.0078(K4) -> +0.0108(K6) -> +0.0134(K8); Wilcoxon p 0.017 -> 0.011 -> 0.0024.
-    # (Matched 1-seed gate at K=8 in that same run was +0.0015, p=0.52 -- also n.s.)
-    ("levelG", 8):    dict(struct=0.6483, scram=0.6328, median_dauc=+0.0134, npos=10, n=12,
-                           sign_p=0.01929, wil_p=0.002441, run_deltas=[0.0155]),
-    # Level 8 bias GROWS and gets MORE significant with K: dAUC +0.0078(K4) -> +0.0108(K6) ->
-    # +0.0134(K8); Wilcoxon p 0.017 -> 0.011 -> 0.0024. SOURCE: _levelG_k8_final.log (1 seed).
+    ("gate", 4):         dict(struct=0.6359, scram=0.6324, median_dauc=+0.0045, npos=8, n=12, seeds=5,
+                              sign_p=0.1938, wil_p=0.1018, run_deltas=[0.0049, 0.0057, -0.0038, 0.0065, 0.0043]),
+    ("levelG", 4):       dict(struct=0.6310, scram=0.6310, median_dauc=-0.0008, npos=6, n=12, seeds=5,
+                              sign_p=0.6128, wil_p=0.6333, run_deltas=[0.0163, 0.0016, -0.028, 0.0084, 0.0017]),
+    ("classicalGNN", 4): dict(struct=0.6934, scram=0.6907, median_dauc=+0.0034, npos=8, n=12, seeds=5,
+                              sign_p=0.1938, wil_p=0.1331, run_deltas=[0.0168, 0.0065, -0.0002, -0.0022, -0.0074]),
+    ("meas_only", 4):    dict(struct=0.6072, scram=0.6337, median_dauc=-0.0271, npos=0, n=12, seeds=2,
+                              sign_p=1.0,    wil_p=1.0,     run_deltas=[-0.0091, -0.0438]),
+    ("gate", 6):         dict(struct=0.6409, scram=0.6379, median_dauc=+0.0026, npos=9, n=12, seeds=3,
+                              sign_p=0.073,  wil_p=0.1331,  run_deltas=[0.012, -0.003, -0.0001]),
+    ("levelG", 6):       dict(struct=0.6512, scram=0.6412, median_dauc=+0.0108, npos=9, n=12, seeds=3,
+                              sign_p=0.073,  wil_p=0.0105,  run_deltas=[0.0165, 0.0069, 0.0066]),
+    ("classicalGNN", 6): dict(struct=0.7025, scram=0.6992, median_dauc=+0.0043, npos=8, n=12, seeds=5,
+                              sign_p=0.1938, wil_p=0.05493, run_deltas=[0.0092, 0.0037, 0.0099, -0.0041, -0.0025]),
+    ("gate", 8):         dict(struct=0.6579, scram=0.6557, median_dauc=+0.0030, npos=7, n=12, seeds=2,
+                              sign_p=0.3872, wil_p=0.1697,  run_deltas=[-0.0003, 0.0046]),
+    ("levelG", 8):       dict(struct=0.6483, scram=0.6328, median_dauc=+0.0134, npos=10, n=12, seeds=1,
+                              sign_p=0.01929, wil_p=0.002441, run_deltas=[0.0155]),
+    ("classicalGNN", 8): dict(struct=0.7103, scram=0.6993, median_dauc=+0.0109, npos=12, n=12, seeds=5,
+                              sign_p=0.0002441, wil_p=0.0002441, run_deltas=[0.0162, 0.0102, 0.0196, 0.0092, -0.0003]),
 }
 
 # ---------------------------------------------------------------------------
@@ -121,6 +128,7 @@ CONFIG_LABEL = {
     "gate": "Gate-gated (single-qubit readout)",
     "levelG": "Level 8 (gate + bond-correlator readout)",
     "meas_only": "Measurement-only (fixed ring entangler)",
+    "classicalGNN": "Classical GNN (same bond-pooled readout)",
 }
 
 

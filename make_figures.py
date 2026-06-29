@@ -30,6 +30,7 @@ plt.rcParams.update({
 })
 C = {  # consistent colours
     "gate": "#4C72B0", "levelG": "#C44E52", "meas_only": "#8C8C8C",
+    "classicalGNN": "#55A868",
     "structured": "#C44E52", "scrambled": "#4C72B0", "separable": "#55A868",
     "classical": "#8172B3", "zero": "#444444", "sig": "#C44E52", "ns": "#B0B0B0",
 }
@@ -45,33 +46,36 @@ def save(fig, name):
 
 # ================================ AGGREGATE ================================
 def fig_bias_vs_qubits():
-    """Headline scaling figure: gate-gated bias FADES with K; Level 8 readout GROWS."""
-    fig, ax = plt.subplots(figsize=(6.4, 4.3))
-    for cfg in ("gate", "levelG"):
-        ks = [k for (c, k) in R.DECOMP if c == cfg]
-        ks.sort()
-        xs, ys, ps = [], [], []
-        for k in ks:
-            d = R.DECOMP[(cfg, k)]
-            xs.append(k); ys.append(d["median_dauc"]); ps.append(d["wil_p"])
+    """Headline scaling figure: the graph-topology bias is SUBSTRATE-INDEPENDENT (quantum AND
+    classical) and GROWS with the number of coarse-graph nodes K; n.s. at K=4 for all, robust by
+    K=8. Marker labels carry the per-cell seed count (n.s. at K=4 corrects an earlier 2-seed
+    artifact)."""
+    fig, ax = plt.subplots(figsize=(7.0, 4.6))
+    off = {"gate": -16, "levelG": 11, "classicalGNN": -16}
+    for cfg in ("gate", "levelG", "classicalGNN"):
+        ks = sorted([k for (c, k) in R.DECOMP if c == cfg])
+        xs = [k for k in ks]
+        ys = [R.DECOMP[(cfg, k)]["median_dauc"] for k in ks]
+        ps = [R.DECOMP[(cfg, k)]["wil_p"] for k in ks]
+        ss = [R.DECOMP[(cfg, k)].get("seeds", "?") for k in ks]
         ax.plot(xs, ys, "-", color=C[cfg], lw=2.2, zorder=2,
                 label=R.CONFIG_LABEL[cfg].split(" (")[0])
-        for x, y, p in zip(xs, ys, ps):
-            ax.scatter([x], [y], s=130 if SIG(p) else 90,
+        for x, y, p, s in zip(xs, ys, ps, ss):
+            ax.scatter([x], [y], s=130 if SIG(p) else 80,
                        facecolor=C[cfg] if SIG(p) else "white",
                        edgecolor=C[cfg], linewidth=2, zorder=3)
-            ax.annotate(("p=%.3f" % p) + (" *" if SIG(p) else ""), (x, y),
-                        textcoords="offset points", xytext=(0, 11 if cfg == "levelG" else -16),
-                        ha="center", fontsize=8.5, color=C[cfg])
+            ax.annotate(("p=%.3f" % p) + (" *" if SIG(p) else "") + f"\n[{s}s]", (x, y),
+                        textcoords="offset points", xytext=(0, off[cfg]),
+                        ha="center", fontsize=7.6, color=C[cfg])
     ax.axhline(0, color=C["zero"], lw=1, ls="--", alpha=0.7)
     ax.set_xticks([4, 6, 8])
-    ax.set_ylim(-0.0016, 0.0162)
+    ax.set_ylim(-0.0055, 0.0175)
     ax.set_xlabel("Qubits K  (=  coarse graph nodes)")
     ax.set_ylabel("Median per-task ΔAUC  (structured − scrambled)")
-    ax.set_title("Quantum topology bias vs circuit size")
-    ax.legend(loc="center left", frameon=False)
-    ax.text(0.99, 0.01, "filled marker = Wilcoxon p < 0.05 (scaffold CV, 12 Tox21 tasks)",
-            transform=ax.transAxes, ha="right", va="bottom", fontsize=8, color="#666")
+    ax.set_title("Graph-topology bias vs circuit size (quantum & classical)")
+    ax.legend(loc="upper left", frameon=False, fontsize=9)
+    ax.text(0.99, 0.01, "filled = Wilcoxon p<0.05 (scaffold CV, 12 Tox21 tasks); [Ns] = seeds",
+            transform=ax.transAxes, ha="right", va="bottom", fontsize=7.5, color="#666")
     save(fig, "fig01_bias_vs_qubits.png")
 
 

@@ -24,7 +24,7 @@ We decompose the bias by comparing three configs, each as structured (A=true adj
 If meas_only shows a clean structured>scrambled, the measurement mechanism carries bias on its
 own; if levelG > gate, the readout adds on top of the gate-gating.
 """
-import argparse, numpy as np, torch, torch.nn as nn
+import os, argparse, numpy as np, torch, torch.nn as nn
 import pennylane as qml
 from scipy.stats import wilcoxon, binomtest
 
@@ -94,9 +94,37 @@ class GraphG(nn.Module):
         return self.head(torch.cat(feats, -1))
 
 
+class ClassicalGNN(nn.Module):
+    """Classical analogue of Level 8's measurement readout, to test whether the *quantum*
+    correlator carries topology signal a classical edge feature does not.
+
+    Mirrors Level 8 structurally: a per-node embedding (the analogue of single-qubit observables)
+    plus an A-weighted bond-pooled pairwise PRODUCT of node embeddings (the classical counterpart
+    of the bond-pooled two-qubit correlator b[i]=sum_j A[i,j]<Z_iZ_j>). The same `structured`
+    (true A) vs `scrambled` (random A) control applies, so the structured-scrambled gap measures
+    exactly the same thing as Level 8's, but with a classical message-passing readout."""
+    def __init__(self, k, d=16, out_dim=N_TASKS):
+        super().__init__()
+        self.k = k
+        self.node = nn.Sequential(nn.Linear(FDIM, d), nn.ReLU(), nn.Linear(d, d))
+        self.head = nn.Sequential(nn.Linear(2 * d, d), nn.ReLU(), nn.Linear(d, out_dim))
+
+    def forward(self, qf, adj):
+        h = self.node(qf)                              # (B,K,d) node embeddings
+        # bond-pooled pairwise product: b_i = sum_j A[i,j] (h_i (.) h_j) = h_i (.) sum_j A[i,j] h_j
+        agg = torch.einsum('bij,bjd->bid', adj, h)     # (B,K,d) neighbour aggregation
+        b = h * agg                                    # (B,K,d) element-wise interaction (~correlator)
+        graph = torch.cat([h.mean(1), b.mean(1)], -1)  # (B,2d) permutation-invariant pooling
+        return self.head(graph)
+
+
 def train_eval(cfg, variant, k, seed, tr, va, te, QF, AT, AR, Y, epochs, batch=128):
     torch.manual_seed(seed)
-    model = GraphG(k, entangler=cfg['entangler'], readout=cfg['readout'])
+    if cfg.get('kind') == 'classical':
+        d = cfg.get('d_by_k', {}).get(k, cfg.get('d', 16))
+        model = ClassicalGNN(k, d=d)
+    else:
+        model = GraphG(k, entangler=cfg['entangler'], readout=cfg['readout'])
     adj = AR if variant == 'scrambled' else AT
     QFt, At, Yt = torch.tensor(QF), torch.tensor(adj), torch.tensor(Y)
     pw = pos_weight(Y, tr)
@@ -122,7 +150,7 @@ def train_eval(cfg, variant, k, seed, tr, va, te, QF, AT, AR, Y, epochs, batch=1
     return best_probs
 
 
-def run_cfg(name, cfg, k, datasets, folds, seeds, epochs, max_mols=0):
+def run_cfg(name, cfg, k, datasets, folds, seeds, epochs, max_mols=0, train_frac=1.0):
     QF0, AT, AR, Y, SCAF = featurize(k, datasets)
     if max_mols and max_mols < len(Y):
         # Fixed subsample so a reduced (lower-power) point fits a single foreground call when
@@ -131,16 +159,25 @@ def run_cfg(name, cfg, k, datasets, folds, seeds, epochs, max_mols=0):
         QF0, AT, AR, Y, SCAF = QF0[sel], AT[sel], AR[sel], Y[sel], SCAF[sel]
     fold_list = list(scaffold_folds(SCAF, folds))
     N = len(Y); seed_s, seed_c, run_deltas = [], [], []
+    n_train_used = []
     for seed in seeds:
         ps = np.full((N, N_TASKS), np.nan); pc = np.full((N, N_TASKS), np.nan)
-        for tr, va, te in fold_list:
+        for fi, (tr, va, te) in enumerate(fold_list):
+            if train_frac < 1.0:
+                # Learning-curve: subsample only the TRAIN set (val/test held full so the per-task
+                # ROC is computed on identical molecules across train sizes). Inductive bias should
+                # help most when training data is scarce -> the struct-scram gap should widen.
+                rng = np.random.default_rng(7000 * seed + fi)
+                n_keep = max(4 * N_TASKS, int(round(train_frac * len(tr))))
+                tr = rng.choice(tr, min(n_keep, len(tr)), replace=False)
+            n_train_used.append(len(tr))
             QF = standardize(QF0, tr)
             ps[te] = train_eval(cfg, 'structured', k, seed, tr, va, te, QF, AT, AR, Y, epochs)
             pc[te] = train_eval(cfg, 'scrambled', k, seed, tr, va, te, QF, AT, AR, Y, epochs)
         a_s, a_c = per_task_auc(Y, ps), per_task_auc(Y, pc)
         seed_s.append(a_s); seed_c.append(a_c)
         run_deltas.append(float(np.nanmean(a_s) - np.nanmean(a_c)))
-        print(f"  [{name}] K={k} seed{seed}: struct {np.nanmean(a_s):.4f}  "
+        print(f"  [{name}] K={k} f={train_frac:g} seed{seed}: struct {np.nanmean(a_s):.4f}  "
               f"scram {np.nanmean(a_c):.4f}  run-dAUC {run_deltas[-1]:+.4f}", flush=True)
     A_s = np.nanmean(np.vstack(seed_s), 0); A_c = np.nanmean(np.vstack(seed_c), 0)
     m = ~np.isnan(A_s) & ~np.isnan(A_c); d = A_s[m] - A_c[m]
@@ -150,19 +187,25 @@ def run_cfg(name, cfg, k, datasets, folds, seeds, epochs, max_mols=0):
         wp = wilcoxon(d, alternative='greater').pvalue
     except ValueError:
         wp = float('nan')
-    print(f"\n[{name}] K={k}  structured {np.nanmean(A_s):.4f}  scrambled {np.nanmean(A_c):.4f}",
-          flush=True)
+    ntr = int(np.mean(n_train_used)) if n_train_used else 0
+    print(f"\n[{name}] K={k} frac={train_frac:g} (~{ntr} train/fold)  "
+          f"structured {np.nanmean(A_s):.4f}  scrambled {np.nanmean(A_c):.4f}", flush=True)
     print(f"        per-task median dAUC {np.median(d):+.4f}  {npos}/{n} pos  "
           f"sign p={sgn:.4g}  Wilcoxon p={wp:.4g}  | run-level {np.mean(run_deltas):+.4f} "
           f"{np.round(run_deltas,4).tolist()}", flush=True)
-    return dict(name=name, k=k, struct=float(np.nanmean(A_s)), scram=float(np.nanmean(A_c)),
-                median=float(np.median(d)), npos=npos, n=n, sign_p=float(sgn), wil_p=float(wp))
+    return dict(name=name, k=k, train_frac=train_frac, n_train=ntr,
+                struct=float(np.nanmean(A_s)), scram=float(np.nanmean(A_c)),
+                median=float(np.median(d)), npos=npos, n=n, sign_p=float(sgn), wil_p=float(wp),
+                run_deltas=[float(x) for x in run_deltas])
 
 
 CONFIGS = {
-    'gate':      dict(entangler='graph', readout='single'),
-    'levelG':    dict(entangler='graph', readout='graph'),
-    'meas_only': dict(entangler='fixed', readout='graph'),
+    'gate':         dict(entangler='graph', readout='single'),
+    'levelG':       dict(entangler='graph', readout='graph'),
+    'meas_only':    dict(entangler='fixed', readout='graph'),
+    'classicalGNN': dict(kind='classical'),         # d=16 (~2.6k params, unconstrained context)
+    # exact per-K param match to quantum Level 8 (302/452/610): d=7/9/11 -> ~299/435/595 params
+    'classicalGNN_pm': dict(kind='classical', d_by_k={4: 7, 6: 9, 8: 11}),
 }
 
 
@@ -177,17 +220,31 @@ def main():
     ap.add_argument('--max_mols', type=int, default=0,
                     help='Subsample to this many molecules (0=all). Lets a reduced point fit a '
                          'single foreground call when background execution is unavailable.')
+    ap.add_argument('--train_fracs', type=float, nargs='+', default=[1.0],
+                    help='Learning-curve: fractions of the TRAIN set to use (val/test held full). '
+                         'Tests whether the inductive-bias gap widens as data gets scarce.')
+    ap.add_argument('--out', type=str, default='', help='Optional JSON path to save all rows.')
     args = ap.parse_args()
     rows = []
     for k in args.qubits:
-        for name in args.configs:
-            rows.append(run_cfg(name, CONFIGS[name], k, args.datasets, args.folds, args.seeds,
-                                args.epochs, args.max_mols))
-    print("\n==== LEVEL G DECOMPOSITION (structured - scrambled bias) ====", flush=True)
+        for frac in args.train_fracs:
+            for name in args.configs:
+                rows.append(run_cfg(name, CONFIGS[name], k, args.datasets, args.folds, args.seeds,
+                                    args.epochs, args.max_mols, frac))
+    lc = len(args.train_fracs) > 1
+    print("\n==== " + ("LEARNING CURVE (bias vs train fraction)" if lc
+                       else "LEVEL G DECOMPOSITION (structured - scrambled bias)") + " ====", flush=True)
     for r in rows:
-        print(f"  {r['name']:>9} K={r['k']}: median dAUC {r['median']:+.4f}  {r['npos']}/{r['n']} pos  "
-              f"sign p={r['sign_p']:.4g}  Wilcoxon p={r['wil_p']:.4g}  "
+        tag = f"frac={r['train_frac']:g} (~{r['n_train']} tr)" if lc else ""
+        print(f"  {r['name']:>9} K={r['k']} {tag}: median dAUC {r['median']:+.4f}  "
+              f"{r['npos']}/{r['n']} pos  sign p={r['sign_p']:.4g}  Wilcoxon p={r['wil_p']:.4g}  "
               f"(struct {r['struct']:.4f} / scram {r['scram']:.4f})", flush=True)
+    if args.out:
+        import json
+        os.makedirs(os.path.dirname(args.out) or '.', exist_ok=True)
+        with open(args.out, 'w') as f:
+            json.dump(rows, f, indent=2)
+        print(f"\nsaved {len(rows)} rows -> {args.out}", flush=True)
 
 
 if __name__ == '__main__':

@@ -257,9 +257,25 @@ def main():
     # separable=entanglement control, classical=context baseline.
     model_types = ['classical', 'separable', 'scrambled', 'quantum']
 
+    # CONTROL VALIDITY (see docs/04_inductive_bias_probe.md, _verify_absorb.py):
+    # the 'scrambled' control is a fixed input permutation in front of a free nn.Linear, which
+    # training re-absorbs (permuting a projection's output columns == permuting its weight rows)
+    # UNLESS the same projected vector is reused under multiple conflicting permutations.
+    #   L1: no chemistry->operator routing -> scrambled == structured (no control)
+    #   L2, L4: each input has ONE perm via its own free projection -> bit-exact absorbable (VACUOUS)
+    #   L3: motif reused under 2 perms -> weak/partial
+    #   L5, L6, L7: one chem vector reused under 4-5 perms -> GENUINE control
+    # So structured-vs-scrambled is only interpretable at Levels 3 (weakly) and 5-7. For a
+    # non-absorbable, scalable graph-topology bias use the measurement-based Level 8 probe
+    # (run_bias_probe.py / run_levelG_probe.py).
+    ABSORBABLE_LEVELS = {1, 2, 4}
+
     for level in args.levels:
         for scale in args.qubits:
             print(f"\n--- Level {level} (Qubits: {scale}) ---")
+            if level in ABSORBABLE_LEVELS:
+                print(f"  [!] Level {level}: 'scrambled' control is ABSORBABLE (see docs/04); "
+                      f"structured-vs-scrambled here is NOT a valid inductive-bias test.")
             # fold_block[m][block][metric] = list over folds
             fold_block = {m: {b: {'roc': [], 'pr': [], 'brier': []} for b in block_names}
                           for m in model_types}
