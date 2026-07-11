@@ -4,11 +4,16 @@ import torch
 import torch.nn as nn
 
 class QuantumLayer(nn.Module):
-    def __init__(self, n_qubits, n_layers=2, ansatz='strong'):
+    def __init__(self, n_qubits, n_layers=2, ansatz='strong', readout='z'):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
         self.ansatz_type = ansatz
+        # readout='xyz' measures <X>,<Y>,<Z> per qubit (3*n_qubits features); 'z' keeps the
+        # legacy single <Z> per qubit (used by the older QuantumEnsemble). The richer readout
+        # exposes phase information and gives the head far more signal to learn from.
+        self.readout = readout
+        self.n_obs = (3 if readout == 'xyz' else 1) * n_qubits
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
@@ -22,7 +27,11 @@ class QuantumLayer(nn.Module):
                 # Standard VQC
                 qml.AngleEmbedding(inputs, wires=range(n_qubits))
 
-                if ansatz == 'strong':
+                if ansatz in ('strong', 'scrambled'):
+                    # Level 1 has no chemistry->operator-geometry mapping (a single generic
+                    # embedding + entangler), so the 'scrambled' control is structurally
+                    # identical to 'strong' here. The scramble has a lever only from Level 2
+                    # onward, where features drive specific operator families/geometry.
                     qml.StronglyEntanglingLayers(weights, wires=range(n_qubits))
                 elif ansatz == 'mps':
                     qml.BasicEntanglerLayers(weights, wires=range(n_qubits))
@@ -35,18 +44,32 @@ class QuantumLayer(nn.Module):
                         if n_qubits > 1:
                             for i in range(n_qubits):
                                 qml.CNOT(wires=[i, (i+1)%n_qubits])
+                elif ansatz == 'separable':
+                    # Ablation: single-qubit rotations only, NO entanglement.
+                    # Used as the "separable" control in the benchmark suite to test
+                    # whether entanglement (not just added parameters) drives any gain.
+                    for l in range(n_layers):
+                        for i in range(n_qubits):
+                            qml.RY(weights[l, i, 0], wires=i)
+                            qml.RZ(weights[l, i, 1], wires=i)
 
+            if readout == 'xyz':
+                return ([qml.expval(qml.PauliX(i)) for i in range(n_qubits)] +
+                        [qml.expval(qml.PauliY(i)) for i in range(n_qubits)] +
+                        [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)])
             return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
 
         self.qnode = circuit
 
-        if ansatz == 'strong':
+        if ansatz in ('strong', 'scrambled'):
             self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 3))
         elif ansatz == 'reupload':
             self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 3))
         elif ansatz == 'mps':
             self.weights = nn.Parameter(torch.randn(n_layers, n_qubits))
         elif ansatz == 'hea':
+            self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 2))
+        elif ansatz == 'separable':
             self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 2))
 
     def forward(self, x):

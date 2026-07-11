@@ -148,4 +148,4 @@ class HybridClassicalEnsemble(nn.Module):
         graph_emb = self.gnn.forward_features(data)
         latent = self.projection(graph_emb)
         logits, _ = self.ensemble(latent)
-        return logits, latent
+        return logits, latent, self.gnn.desc_head(graph_emb)

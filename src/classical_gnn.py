@@ -8,6 +8,9 @@ class GINEBlock(nn.Module):
     def __init__(self, hidden_dim, edge_emb_dim=8):
         super().__init__()
         self.edge_emb = nn.Embedding(16, edge_emb_dim)
+        # Add linear projection for continuous 3D distance edge attribute
+        self.dist_proj = nn.Linear(1, edge_emb_dim)
+
         self.mlp = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(),
@@ -15,24 +18,35 @@ class GINEBlock(nn.Module):
         )
         self.conv = GINEConv(self.mlp, train_eps=True, edge_dim=edge_emb_dim)
 
-    def forward(self, x, edge_index, edge_attr):
+    def forward(self, x, edge_index, edge_attr, edge_attr_cont=None):
         # Hash 3-dim edge attr to 1 index for simple embedding
         h = (edge_attr[:,0] + 3*edge_attr[:,1] + 7*edge_attr[:,2]) % 16
         e = self.edge_emb(h)
+
+        # Add continuous 3D spatial distance embedding if available
+        if edge_attr_cont is not None:
+            e = e + self.dist_proj(edge_attr_cont)
+
         return self.conv(x, edge_index, e)
 
 class GATBlock(nn.Module):
     def __init__(self, hidden_dim, heads=4, edge_emb_dim=8):
         super().__init__()
         self.edge_emb = nn.Embedding(16, edge_emb_dim)
+        self.dist_proj = nn.Linear(1, edge_emb_dim)
         # GATv2Conv with edge attributes
         self.conv = GATv2Conv(hidden_dim, hidden_dim // heads, heads=heads,
                               edge_dim=edge_emb_dim, add_self_loops=False)
         self.lin = nn.Linear(hidden_dim, hidden_dim)
 
-    def forward(self, x, edge_index, edge_attr):
+    def forward(self, x, edge_index, edge_attr, edge_attr_cont=None):
         h = (edge_attr[:,0] + 3*edge_attr[:,1] + 7*edge_attr[:,2]) % 16
         e = self.edge_emb(h)
+
+        # Add continuous 3D spatial distance embedding if available
+        if edge_attr_cont is not None:
+            e = e + self.dist_proj(edge_attr_cont)
+
         # x: (N, hidden), output: (N, heads * hidden/heads) = (N, hidden)
         out = self.conv(x, edge_index, edge_attr=e)
         out = self.lin(out) # Projection to mix heads
@@ -75,6 +89,14 @@ class ClassicalGNN(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(128, out_dim)
         )
+
+        # Auxiliary Descriptor Head
+        self.desc_head = nn.Sequential(
+            nn.Linear(hidden_dim, 64),
+            nn.ReLU(),
+            nn.Linear(64, 6) # 6 descriptors
+        )
+
         self.hidden_dim = hidden_dim
 
     def forward_features(self, data):
@@ -90,11 +112,12 @@ class ClassicalGNN(nn.Module):
         x = self.proj(x)
         x = self.dropout(x)
 
-        x = F.relu(self.gnn1(x, data.edge_index, data.edge_attr))
+        dist_attr = getattr(data, 'edge_attr_cont', None)
+        x = F.relu(self.gnn1(x, data.edge_index, data.edge_attr, dist_attr))
         x = self.dropout(x)
-        x = F.relu(self.gnn2(x, data.edge_index, data.edge_attr))
+        x = F.relu(self.gnn2(x, data.edge_index, data.edge_attr, dist_attr))
         x = self.dropout(x)
-        x = self.bn(F.relu(self.gnn3(x, data.edge_index, data.edge_attr)))
+        x = self.bn(F.relu(self.gnn3(x, data.edge_index, data.edge_attr, dist_attr)))
 
         batch = getattr(data, 'batch', torch.zeros(x.size(0), dtype=torch.long, device=x.device))
         graph_emb = self.readout(x, batch)
@@ -102,4 +125,8 @@ class ClassicalGNN(nn.Module):
 
     def forward(self, data):
         h = self.forward_features(data)
-        return self.head(h).squeeze(-1)
+        logits = self.head(h).squeeze(-1)
+
+        # Return descriptors explicitly alongside logits for Multi-Task Regression
+        desc_preds = self.desc_head(h)
+        return logits, h, desc_preds

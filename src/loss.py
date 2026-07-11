@@ -3,40 +3,60 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-class MaskedBCEWithLogitsLoss(nn.Module):
-    def __init__(self, pos_weight=None):
+class MaskedMultiTaskFocalLoss(nn.Module):
+    def __init__(self, alpha=None, gamma=0.0):
         super().__init__()
-        self.pos_weight = pos_weight
+        # alpha here refers to the positive class weight (pos_weight) passed down.
+        # gamma is the focal modulating exponent; gamma=0 -> plain (weighted) BCE.
+        # NOTE: gamma defaults to 0. Stacking focal modulation (1-p_t)^gamma ON TOP of a
+        # large pos_weight double-counts class imbalance and was collapsing the multi-task
+        # outputs toward uninformative (base-rate) rankings -> ROC ~ 0.5 everywhere.
+        self.alpha_weight = alpha
+        self.gamma = gamma
 
     def forward(self, logits, target):
-        # target shape: (B, 12), logits shape: (B, 12)
+        # target shape: (B, num_tasks), logits shape: (B, num_tasks)
         # target may contain NaNs
-
         mask = ~torch.isnan(target)
-        # Replace NaNs with 0 temporarily for BCE calculation (masked out later)
         target_clean = torch.where(mask, target, torch.zeros_like(target))
 
-        # Adjust pos_weight to device if needed
-        if self.pos_weight is not None:
-            if self.pos_weight.device != logits.device:
-                self.pos_weight = self.pos_weight.to(logits.device)
-            # pos_weight shape (12,) broadcasts to (B, 12)
-            criterion = nn.BCEWithLogitsLoss(reduction='none', pos_weight=self.pos_weight)
+        # Compute standard BCE loss per element without reduction
+        if self.alpha_weight is not None:
+            if self.alpha_weight.device != logits.device:
+                self.alpha_weight = self.alpha_weight.to(logits.device)
+            # Apply pos_weight via BCEWithLogitsLoss
+            bce_loss = F.binary_cross_entropy_with_logits(
+                logits, target_clean, reduction='none', pos_weight=self.alpha_weight
+            )
         else:
-            criterion = nn.BCEWithLogitsLoss(reduction='none')
+            bce_loss = F.binary_cross_entropy_with_logits(
+                logits, target_clean, reduction='none'
+            )
 
-        loss = criterion(logits, target_clean)
+        # Optional focal modulation. With gamma=0 this factor is identically 1.0 and the
+        # loss is exactly masked (weighted) BCE.
+        if self.gamma and self.gamma > 0:
+            probs = torch.sigmoid(logits)
+            p_t = target_clean * probs + (1 - target_clean) * (1 - probs)
+            bce_loss = torch.pow(1.0 - p_t, self.gamma) * bce_loss
 
-        # Apply mask
-        loss = loss * mask.float()
+        # Apply missing-label mask
+        masked_loss = bce_loss * mask.float()
 
         # Average over valid elements
-        # Avoid division by zero
         num_valid = mask.sum()
         if num_valid > 0:
-            return loss.sum() / num_valid
+            return masked_loss.sum() / num_valid
         else:
-            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+            # No valid labels in this batch: return a zero that stays connected to the
+            # graph (a detached tensor would silently break backprop for the step).
+            return logits.sum() * 0.0
+
+# Keep the original wrapper name for compatibility with other files.
+# Defaults to plain masked BCE (gamma=0); pass gamma>0 to opt back into focal loss.
+class MaskedBCEWithLogitsLoss(MaskedMultiTaskFocalLoss):
+    def __init__(self, pos_weight=None, gamma=0.0):
+        super().__init__(alpha=pos_weight, gamma=gamma)
 
 class MultiTaskSupervisedContrastiveLoss(nn.Module):
     def __init__(self, temperature=0.07):
@@ -132,4 +152,5 @@ class MultiTaskSupervisedContrastiveLoss(nn.Module):
         if valid_tasks > 0:
             return total_loss / valid_tasks
         else:
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            # Zero that stays connected to the graph (avoids a detached-tensor no-op).
+            return features.sum() * 0.0
