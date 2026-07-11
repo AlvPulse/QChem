@@ -23,3 +23,6 @@ build/
 
 data/
 results/
+*.csvdummy_data.py
+featurize.py
+dummy_data.py

@@ -1,26 +1,40 @@
 
 import torch
 import torch.nn as nn
-from sklearn.metrics import roc_auc_score, average_precision_score
+from sklearn.metrics import roc_auc_score, average_precision_score, brier_score_loss, f1_score
 import numpy as np
 from tqdm import tqdm
 from .loss import MaskedBCEWithLogitsLoss, MultiTaskSupervisedContrastiveLoss
 
 class Trainer:
-    def __init__(self, model, device='cpu', pos_weight=None, alpha=0.1):
+    # Parameter-name fragments that identify variational quantum-circuit parameters.
+    # These get a higher learning rate: the small VQCs train far slower than the
+    # classical encoder/head at a shared 1e-3, and were being suppressed.
+    Q_PARAM_KEYS = ('q_layer', 'q_motif', 'q_cycle', 'q_spectral')
+
+    def __init__(self, model, device='cpu', pos_weight=None, alpha=0.1, lambda_desc=0.1,
+                 lr=1e-3, q_lr=1e-2):
         self.model = model.to(device)
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
-        self.alpha = alpha
 
-        # Loss with imbalance handling
+        q_params, base_params = [], []
+        for n, p in model.named_parameters():
+            (q_params if any(k in n for k in self.Q_PARAM_KEYS) else base_params).append(p)
+        groups = [{'params': base_params, 'lr': lr}]
+        if q_params:
+            groups.append({'params': q_params, 'lr': q_lr})
+        self.optimizer = torch.optim.AdamW(groups, lr=lr, weight_decay=1e-4)
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=5)
+        self.alpha = alpha
+        self.lambda_desc = lambda_desc
+
         if pos_weight is not None:
-            # pos_weight is a tensor of shape (12,)
             self.criterion_bce = MaskedBCEWithLogitsLoss(pos_weight=pos_weight)
         else:
             self.criterion_bce = MaskedBCEWithLogitsLoss()
 
         self.criterion_sup = MultiTaskSupervisedContrastiveLoss(temperature=0.07)
+        self.criterion_desc = nn.MSELoss()
 
     def train_epoch(self, loader):
         self.model.train()
@@ -33,17 +47,24 @@ class Trainer:
 
             out = self.model(batch)
 
-            # Check if model returns (logits, latent) or just logits
+            # Check model outputs
+            loss_desc = 0.0
             if isinstance(out, tuple):
-                logits, latent = out
+                if len(out) == 3:
+                    logits, latent, desc_preds = out
+                    if hasattr(batch, 'y_desc'):
+                        loss_desc = self.criterion_desc(desc_preds, batch.y_desc)
+                else:
+                    logits, latent = out
                 loss_bce = self.criterion_bce(logits, batch.y)
                 loss_sup = self.criterion_sup(latent, batch.y)
-                loss = loss_bce + self.alpha * loss_sup
+                loss = loss_bce + self.alpha * loss_sup + self.lambda_desc * loss_desc
             else:
                 logits = out
                 loss = self.criterion_bce(logits, batch.y)
 
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
 
             total_loss += loss.item()
@@ -52,6 +73,8 @@ class Trainer:
 
         metrics = self.calculate_metrics(all_y, all_probs)
         metrics['loss'] = total_loss / len(loader)
+        metrics['y_true'] = np.array(all_y)
+        metrics['y_prob'] = np.array(all_probs)
         return metrics
 
     @torch.no_grad()
@@ -64,12 +87,18 @@ class Trainer:
             batch = batch.to(self.device)
             out = self.model(batch)
 
+            loss_desc = 0.0
             if isinstance(out, tuple):
-                logits, _ = out
+                if len(out) == 3:
+                    logits, _, desc_preds = out
+                    if hasattr(batch, 'y_desc'):
+                        loss_desc = self.criterion_desc(desc_preds, batch.y_desc)
+                else:
+                    logits, _ = out
             else:
                 logits = out
 
-            loss = self.criterion_bce(logits, batch.y)
+            loss = self.criterion_bce(logits, batch.y) + self.lambda_desc * loss_desc
 
             total_loss += loss.item()
             all_y.extend(batch.y.cpu().numpy())
@@ -77,15 +106,19 @@ class Trainer:
 
         metrics = self.calculate_metrics(all_y, all_probs)
         metrics['loss'] = total_loss / len(loader)
+        metrics['y_true'] = np.array(all_y)
+        metrics['y_prob'] = np.array(all_probs)
         return metrics
 
     def calculate_metrics(self, y_true, y_prob):
         y_true = np.array(y_true)
         y_prob = np.array(y_prob)
-        # y_true: (N, 12), y_prob: (N, 12)
+        # y_true: (N, num_tasks), y_prob: (N, num_tasks)
 
         roc_aucs = []
         pr_aucs = []
+        brier_scores = []
+        f1_scores = []
 
         n_tasks = y_true.shape[1]
         for i in range(n_tasks):
@@ -107,15 +140,22 @@ class Trainer:
             try:
                 roc_aucs.append(roc_auc_score(y_t, p_t))
                 pr_aucs.append(average_precision_score(y_t, p_t))
+                brier_scores.append(brier_score_loss(y_t, p_t))
+
+                # F1 needs binary predictions
+                y_pred = (p_t > 0.5).astype(int)
+                f1_scores.append(f1_score(y_t, y_pred, zero_division=0))
             except ValueError:
                 pass
 
         if len(roc_aucs) == 0:
-            return {'roc_auc': 0.5, 'pr_auc': 0.0}
+            return {'roc_auc': 0.5, 'pr_auc': 0.0, 'brier': 0.0, 'f1': 0.0}
 
         return {
             'roc_auc': np.mean(roc_aucs),
-            'pr_auc': np.mean(pr_aucs)
+            'pr_auc': np.mean(pr_aucs),
+            'brier': np.mean(brier_scores),
+            'f1': np.mean(f1_scores)
         }
 
 def run_benchmark(model_type='classical', n_qubits=4, epochs=10, batch_size=32):
