@@ -24,7 +24,7 @@ These four vectors are the inputs to every quantum level.
 
 ## Level 1 — Features → Models
 
-**Theme**: Three parallel generic quantum circuits with attention aggregation.  
+**Theme**: Three parallel generic quantum circuits with attention aggregation.
 **File**: `quantum_levels.py`, lines 67–172.
 
 ### Architecture
@@ -58,7 +58,7 @@ Establishes the baseline: "does adding generic quantum circuits at all produce a
 
 ## Level 2 — Features → Operator Families
 
-**Theme**: Motifs route to R_y, cycles to R_z, spectral to IsingXX.  
+**Theme**: Motifs route to R_y, cycles to R_z, spectral to IsingXX.
 **File**: `quantum_levels.py`, lines 174–289.
 
 ### Chemistry → Operator Correspondence
@@ -101,7 +101,7 @@ Level 2 is the first level where the structured vs. scrambled comparison is mean
 
 ## Level 3 — Features → Operator Geometry
 
-**Theme**: Modulation across feature modalities at the circuit level (quantum interference).  
+**Theme**: Modulation across feature modalities at the circuit level (quantum interference).
 **File**: `quantum_levels.py`, lines 291–439.
 
 ### What Changes from Level 2
@@ -149,7 +149,7 @@ FiLM-style feature modulation: `gamma * x + beta` where gamma and beta are linea
 
 ## Level 4 — 3D Spatial Entanglement
 
-**Theme**: Bond distance modulates entanglement gate strength.  
+**Theme**: Bond distance modulates entanglement gate strength.
 **File**: `quantum_levels.py`, lines 443–559.
 
 ### New Input: 3D Distances
@@ -184,7 +184,7 @@ Two independent permutations:
 
 ## Level 5 — Electronic Structure (Hückel Model)
 
-**Theme**: Rotations encode electronegativity/partial charges; XX/YY encode bonding.  
+**Theme**: Rotations encode electronegativity/partial charges; XX/YY encode bonding.
 **File**: `quantum_levels.py`, lines 561–640.
 
 ### Chemical→Operator Mapping
@@ -216,7 +216,7 @@ Sequential `sigmoid → tanh` non-linearities on linearly projected features.
 
 ## Level 6 — 3D Electrostatic Mapping
 
-**Theme**: Full single-qubit rotations + all-to-all CRZ modulated by pairwise feature products.  
+**Theme**: Full single-qubit rotations + all-to-all CRZ modulated by pairwise feature products.
 **File**: `quantum_levels.py`, lines 642–721.
 
 ### Circuit
@@ -246,7 +246,7 @@ Five permutation streams: `perm_rx`, `perm_ry`, `perm_rz`, `perm_ci`, `perm_cj`.
 
 ## Level 7 — Pharmacophore / Reactivity
 
-**Theme**: U3 full single-qubit rotations per reactivity site; CRX/CRY pharmacophore dependencies.  
+**Theme**: U3 full single-qubit rotations per reactivity site; CRX/CRY pharmacophore dependencies.
 **File**: `quantum_levels.py`, lines 723–801.
 
 ### Chemical→Operator Mapping
