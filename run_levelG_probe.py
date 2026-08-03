@@ -35,12 +35,13 @@ from run_bias_probe import (
 
 
 class GraphG(nn.Module):
-    def __init__(self, k, entangler='graph', readout='graph', n_layers=2, out_dim=N_TASKS):
+    def __init__(self, k, entangler='graph', readout='graph', n_layers=2, out_dim=N_TASKS, normalize_readout=False, device=None):
         super().__init__()
-        self.k = k; self.readout = readout; self.entangler = entangler
+        self.k = k; self.readout = readout; self.entangler = entangler; self.normalize_readout = normalize_readout
         PAIRS = pairs_of(k); P = len(PAIRS)
         self.pi = torch.tensor([i for i, j in PAIRS]); self.pj = torch.tensor([j for i, j in PAIRS])
-        dev = qml.device('default.qubit', wires=k)
+        dev_name = device if device else ('lightning.qubit' if k >= 8 else 'default.qubit')
+        dev = qml.device(dev_name, wires=k)
 
         @qml.qnode(dev, interface='torch')
         def circ(ry, rz, adj, theta, ringp, pairp, enc):
@@ -79,6 +80,9 @@ class GraphG(nn.Module):
         b = torch.zeros(B, self.k, device=corr.device)
         b = b.index_add(1, self.pi.to(corr.device), w)
         b = b.index_add(1, self.pj.to(corr.device), w)
+        if self.normalize_readout:
+            deg = adj.sum(dim=2)  # (B, K) weighted degree
+            b = b / (deg + 1e-8)
         return b
 
     def forward(self, qf, adj):
@@ -124,7 +128,8 @@ def train_eval(cfg, variant, k, seed, tr, va, te, QF, AT, AR, Y, epochs, batch=1
         d = cfg.get('d_by_k', {}).get(k, cfg.get('d', 16))
         model = ClassicalGNN(k, d=d)
     else:
-        model = GraphG(k, entangler=cfg['entangler'], readout=cfg['readout'])
+        model = GraphG(k, entangler=cfg['entangler'], readout=cfg['readout'],
+                       normalize_readout=cfg.get('normalize_readout', False))
     adj = AR if variant == 'scrambled' else AT
     QFt, At, Yt = torch.tensor(QF), torch.tensor(adj), torch.tensor(Y)
     pw = pos_weight(Y, tr)
@@ -206,6 +211,7 @@ CONFIGS = {
     'classicalGNN': dict(kind='classical'),         # d=16 (~2.6k params, unconstrained context)
     # exact per-K param match to quantum Level 8 (302/452/610): d=7/9/11 -> ~299/435/595 params
     'classicalGNN_pm': dict(kind='classical', d_by_k={4: 7, 6: 9, 8: 11}),
+    'levelG_norm':    dict(entangler='graph', readout='graph', normalize_readout=True),
 }
 
 
