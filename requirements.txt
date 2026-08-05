@@ -1,0 +1,15 @@
+# Pinned environment for the quantum inductive-bias benchmark (docs/06, docs/07).
+# Python 3.12.10. CPU-only: no GPU or quantum-hardware dependency (PennyLane `default.qubit`
+# statevector). Install torch from the CPU wheel index if you do not need CUDA:
+#   pip install torch==2.12.0 --index-url https://download.pytorch.org/whl/cpu
+torch==2.12.0
+torch-geometric==2.8.0
+pennylane==0.45.0
+rdkit==2026.3.3
+numpy==2.4.6
+scipy==1.17.1
+scikit-learn==1.9.0
+pandas==3.0.3
+matplotlib==3.11.0
+seaborn==0.13.2
+tqdm==4.68.2

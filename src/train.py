@@ -7,10 +7,23 @@ from tqdm import tqdm
 from .loss import MaskedBCEWithLogitsLoss, MultiTaskSupervisedContrastiveLoss
 
 class Trainer:
-    def __init__(self, model, device='cpu', pos_weight=None, alpha=0.1, lambda_desc=0.1):
+    # Parameter-name fragments that identify variational quantum-circuit parameters.
+    # These get a higher learning rate: the small VQCs train far slower than the
+    # classical encoder/head at a shared 1e-3, and were being suppressed.
+    Q_PARAM_KEYS = ('q_layer', 'q_motif', 'q_cycle', 'q_spectral')
+
+    def __init__(self, model, device='cpu', pos_weight=None, alpha=0.1, lambda_desc=0.1,
+                 lr=1e-3, q_lr=1e-2):
         self.model = model.to(device)
         self.device = device
-        self.optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3, weight_decay=1e-4)
+
+        q_params, base_params = [], []
+        for n, p in model.named_parameters():
+            (q_params if any(k in n for k in self.Q_PARAM_KEYS) else base_params).append(p)
+        groups = [{'params': base_params, 'lr': lr}]
+        if q_params:
+            groups.append({'params': q_params, 'lr': q_lr})
+        self.optimizer = torch.optim.AdamW(groups, lr=lr, weight_decay=1e-4)
         self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode='min', factor=0.5, patience=5)
         self.alpha = alpha
         self.lambda_desc = lambda_desc

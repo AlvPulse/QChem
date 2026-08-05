@@ -4,9 +4,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class MaskedMultiTaskFocalLoss(nn.Module):
-    def __init__(self, alpha=None, gamma=2.0):
+    def __init__(self, alpha=None, gamma=0.0):
         super().__init__()
-        # alpha here refers to the positive class weight (pos_weight) passed down
+        # alpha here refers to the positive class weight (pos_weight) passed down.
+        # gamma is the focal modulating exponent; gamma=0 -> plain (weighted) BCE.
+        # NOTE: gamma defaults to 0. Stacking focal modulation (1-p_t)^gamma ON TOP of a
+        # large pos_weight double-counts class imbalance and was collapsing the multi-task
+        # outputs toward uninformative (base-rate) rankings -> ROC ~ 0.5 everywhere.
         self.alpha_weight = alpha
         self.gamma = gamma
 
@@ -29,32 +33,29 @@ class MaskedMultiTaskFocalLoss(nn.Module):
                 logits, target_clean, reduction='none'
             )
 
-        # Compute probabilities for the focal modulating factor: p_t
-        probs = torch.sigmoid(logits)
-        # p_t = p if y=1 else (1-p)
-        p_t = target_clean * probs + (1 - target_clean) * (1 - probs)
-
-        # Focal Loss: FL(p_t) = -alpha_t * (1 - p_t)**gamma * log(p_t)
-        # We already have the -log(p_t) part (which is the BCE loss, optionally weighted by pos_weight)
-        # So we just multiply by the modulating factor (1 - p_t)**gamma
-        modulating_factor = torch.pow(1.0 - p_t, self.gamma)
-
-        focal_loss = modulating_factor * bce_loss
+        # Optional focal modulation. With gamma=0 this factor is identically 1.0 and the
+        # loss is exactly masked (weighted) BCE.
+        if self.gamma and self.gamma > 0:
+            probs = torch.sigmoid(logits)
+            p_t = target_clean * probs + (1 - target_clean) * (1 - probs)
+            bce_loss = torch.pow(1.0 - p_t, self.gamma) * bce_loss
 
         # Apply missing-label mask
-        focal_loss = focal_loss * mask.float()
+        masked_loss = bce_loss * mask.float()
 
         # Average over valid elements
         num_valid = mask.sum()
         if num_valid > 0:
-            return focal_loss.sum() / num_valid
+            return masked_loss.sum() / num_valid
         else:
-            return torch.tensor(0.0, device=logits.device, requires_grad=True)
+            # No valid labels in this batch: return a zero that stays connected to the
+            # graph (a detached tensor would silently break backprop for the step).
+            return logits.sum() * 0.0
 
-# Keep the original wrapper name for compatibility with other files if necessary,
-# but now it uses Focal Loss logic internally.
+# Keep the original wrapper name for compatibility with other files.
+# Defaults to plain masked BCE (gamma=0); pass gamma>0 to opt back into focal loss.
 class MaskedBCEWithLogitsLoss(MaskedMultiTaskFocalLoss):
-    def __init__(self, pos_weight=None, gamma=2.0):
+    def __init__(self, pos_weight=None, gamma=0.0):
         super().__init__(alpha=pos_weight, gamma=gamma)
 
 class MultiTaskSupervisedContrastiveLoss(nn.Module):
@@ -151,4 +152,5 @@ class MultiTaskSupervisedContrastiveLoss(nn.Module):
         if valid_tasks > 0:
             return total_loss / valid_tasks
         else:
-            return torch.tensor(0.0, device=device, requires_grad=True)
+            # Zero that stays connected to the graph (avoids a detached-tensor no-op).
+            return features.sum() * 0.0
