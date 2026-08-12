@@ -6,6 +6,64 @@ import pennylane as qml
 from .features.semantic_extractor import SemanticFeatureExtractor
 from .quantum_layers import QuantumLayer
 
+
+def _perms(n_qubits, scrambled, n_sites, seed=20240617):
+    """Index permutations used to route input feature columns into gate arguments.
+
+    Returns `n_sites` lists of length `n_qubits`.
+
+    * Not scrambled -> every site is the identity, so feature column i drives the
+      gate(s) on wire i consistently (the structured chemistry->operator geometry).
+    * Scrambled -> each site gets a *different* fixed random permutation. Every gate,
+      weight and wire is untouched (same parameter count, depth and entanglement), but
+      the coherent "feature i <-> qubit i" correspondence is destroyed: the same physical
+      feature drives unrelated qubits at different points in the circuit. Because the
+      upstream learned projection emits a single vector, it cannot undo several
+      inconsistent permutations at once, so the inductive bias is genuinely removed
+      rather than re-absorbed by training.
+    """
+    ids = list(range(n_qubits))
+    if not scrambled or n_qubits < 2:
+        return [ids[:] for _ in range(n_sites)]
+    g = torch.Generator().manual_seed(seed)
+    out = []
+    while len(out) < n_sites:
+        p = torch.randperm(n_qubits, generator=g).tolist()
+        if p == ids:                      # never the identity (would preserve the mapping)
+            continue
+        if out and p == out[-1]:          # consecutive sites must differ
+            continue
+        out.append(p)
+    return out
+
+
+# --- Trainability primitives shared by every level's quantum layer ---
+# The original circuits encoded data directly into the variational weights and measured
+# only <Z>. That collapsed molecular variation and made phase-based biases unmeasurable.
+# The redesign instead: (1) re-uploads each level's chemistry->operator ENCODING every
+# layer (data-dependent, scaled by a learnable enc_scale), (2) interleaves a SEPARATE
+# trainable variational block, and (3) reads out <X>,<Y>,<Z> per qubit.
+N_OBS_PER_QUBIT = 3
+
+
+def _variational_block(theta_l, ent_l, n_qubits, entangle):
+    """One trainable, data-independent variational layer: RY/RZ per qubit + CRZ ring.
+    theta_l: (n_qubits, 2); ent_l: (n_qubits,)."""
+    for i in range(n_qubits):
+        qml.RY(theta_l[i, 0], wires=i)
+        qml.RZ(theta_l[i, 1], wires=i)
+    if entangle:
+        for i in range(n_qubits):
+            qml.CRZ(ent_l[i], wires=[i, (i + 1) % n_qubits])
+
+
+def _xyz_measure(n_qubits):
+    """Read <X>,<Y>,<Z> on every qubit -> 3*n_qubits features (X/Y expose phase info)."""
+    return ([qml.expval(qml.PauliX(i)) for i in range(n_qubits)] +
+            [qml.expval(qml.PauliY(i)) for i in range(n_qubits)] +
+            [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)])
+
+
 class Level1Classical(nn.Module):
     """
     Level 1 Classical: "Three MLPs + Attention"
@@ -53,7 +111,8 @@ class Level1Classical(nn.Module):
 
         # Aggregate
         out = torch.sum(stacked * attn_weights, dim=1) # (B, out_dim)
-        return out
+        latent = torch.cat([out_m, out_c, out_s], dim=1) # (B, 3*out_dim)
+        return out, latent, desc_preds
 
 
 class Level1Quantum(nn.Module):
@@ -70,15 +129,17 @@ class Level1Quantum(nn.Module):
         self.proj_cycle = nn.Linear(hidden_dim, n_qubits)
         self.proj_spectral = nn.Linear(hidden_dim, n_qubits)
 
-        # Three independent VQCs
-        self.q_motif = QuantumLayer(n_qubits, n_layers=q_layers, ansatz='strong')
-        self.q_cycle = QuantumLayer(n_qubits, n_layers=q_layers, ansatz='strong')
-        self.q_spectral = QuantumLayer(n_qubits, n_layers=q_layers, ansatz='strong')
+        # Three independent VQCs with the richer <X>,<Y>,<Z> readout (trainability).
+        # The ansatz is configurable so the benchmark's 'separable' (no-entanglement)
+        # ablation actually changes the circuit.
+        self.q_motif = QuantumLayer(n_qubits, n_layers=q_layers, ansatz=ansatz, readout='xyz')
+        self.q_cycle = QuantumLayer(n_qubits, n_layers=q_layers, ansatz=ansatz, readout='xyz')
+        self.q_spectral = QuantumLayer(n_qubits, n_layers=q_layers, ansatz=ansatz, readout='xyz')
 
         # Output heads
-        self.head_motif = nn.Linear(n_qubits, out_dim)
-        self.head_cycle = nn.Linear(n_qubits, out_dim)
-        self.head_spectral = nn.Linear(n_qubits, out_dim)
+        self.head_motif = nn.Linear(self.q_motif.n_obs, out_dim)
+        self.head_cycle = nn.Linear(self.q_cycle.n_obs, out_dim)
+        self.head_spectral = nn.Linear(self.q_spectral.n_obs, out_dim)
 
         # Attention aggregation
         self.attn = nn.Sequential(
@@ -107,7 +168,8 @@ class Level1Quantum(nn.Module):
 
         # Aggregate
         out = torch.sum(stacked * attn_weights, dim=1)
-        return out
+        latent = torch.cat([out_m, out_c, out_s], dim=1) # (B, 3*out_dim)
+        return out, latent, desc_preds
 
 class Level2Classical(nn.Module):
     """
@@ -164,53 +226,46 @@ class Level2QuantumLayer(nn.Module):
     - cycles -> R_z (Phase operators)
     - spectral -> Ising/XY Entanglement (Interaction Hamiltonians)
     """
-    def __init__(self, n_qubits=4, n_layers=2):
+    def __init__(self, n_qubits=4, n_layers=2, ansatz='strong'):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        self.n_obs = N_OBS_PER_QUBIT * n_qubits
+        # 'separable' ablation: drop the spectral coupling + trainable entangler.
+        entangle = (ansatz != 'separable')
+        # 'scrambled' control: break the motif/cycle/spectral -> qubit alignment.
+        pr_m, pr_c, pe_s = _perms(n_qubits, ansatz == 'scrambled', 3)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
-        def circuit(m_inputs, c_inputs, s_inputs, weights):
-            # weights shape: (n_layers, n_qubits, 3)
+        def circuit(m_inputs, c_inputs, s_inputs, theta, ent, enc):
             for l in range(n_layers):
+                # --- ENCODING (re-uploaded): operator-family mapping ---
                 for i in range(n_qubits):
-                    # 1. Motifs -> R_y (Local rotations)
-                    qml.RY(m_inputs[i] * weights[l, i, 0], wires=i)
-
-                    # 2. Cycles -> R_z (Phase accumulations)
-                    qml.RZ(c_inputs[i] * weights[l, i, 1], wires=i)
-
-                # 3. Spectral -> Interaction Hamiltonians (Ising ZZ or XY coupling)
-                # We use the spectral features to scale the entanglement.
-                # For a fixed geometry, we just use a chain or ring.
-                for i in range(n_qubits - 1):
-                    # Ising XX coupling controlled by spectral input + weight
-                    coupling_strength = s_inputs[i] * weights[l, i, 2]
-                    qml.IsingXX(coupling_strength, wires=[i, i+1])
-                # Close the ring
-                qml.IsingXX(s_inputs[-1] * weights[l, -1, 2], wires=[n_qubits-1, 0])
-
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+                    qml.RY(enc[0] * m_inputs[:, pr_m[i]], wires=i)   # motifs -> R_y
+                    qml.RZ(enc[1] * c_inputs[:, pr_c[i]], wires=i)   # cycles -> R_z
+                if entangle:                                          # spectral -> IsingXX
+                    for i in range(n_qubits - 1):
+                        qml.IsingXX(enc[2] * s_inputs[:, pe_s[i]], wires=[i, i + 1])
+                    qml.IsingXX(enc[2] * s_inputs[:, pe_s[n_qubits - 1]], wires=[n_qubits - 1, 0])
+                # --- VARIATIONAL (trainable) ---
+                _variational_block(theta[l], ent[l], n_qubits, entangle)
+            return _xyz_measure(n_qubits)
 
         self.qnode = circuit
-        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 3))
+        self.theta = nn.Parameter(torch.randn(n_layers, n_qubits, 2) * 0.1)
+        self.ent = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.1)
+        self.enc_scale = nn.Parameter(torch.ones(3))
 
     def forward(self, m, c, s):
         m = torch.atan(m)
         c = torch.atan(c)
         s = torch.atan(s)
-
-        # Process batch by batch
-        batch_size = m.shape[0]
-        res = []
-        for b in range(batch_size):
-            out = self.qnode(m[b], c[b], s[b], self.weights)
-            res.append(torch.stack(out))
-        return torch.stack(res, dim=0).float()
+        out = self.qnode(m, c, s, self.theta, self.ent, self.enc_scale)
+        return torch.stack(out, dim=-1).float()         # (B, 3*n_qubits)
 
 class Level2Quantum(nn.Module):
-    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2, ansatz='strong'):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
 
@@ -218,9 +273,9 @@ class Level2Quantum(nn.Module):
         self.proj_cycle = nn.Linear(hidden_dim, n_qubits)
         self.proj_spectral = nn.Linear(hidden_dim, n_qubits)
 
-        self.q_layer = Level2QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
+        self.q_layer = Level2QuantumLayer(n_qubits=n_qubits, n_layers=q_layers, ansatz=ansatz)
 
-        self.head = nn.Linear(n_qubits, out_dim)
+        self.head = nn.Linear(self.q_layer.n_obs, out_dim)
 
     def forward(self, data):
         m, c, s, _, desc_preds = self.extractor(data)
@@ -292,59 +347,75 @@ class Level3Classical(nn.Module):
 
 class Level3QuantumLayer(nn.Module):
     """
-    Level 3 Quantum Layer: "Chemical Operator Geometry"
-    Features directly alter the structure/geometry of operators.
-    - Motifs modulate phase accumulation of cycles: R_z(c + alpha * m)
-    - Spectral modulates entanglement geometry: e^(-i * s * Z_i Z_j)
+    Level 3 Quantum Layer: "Chemical Operator Geometry" (trainable redesign).
+
+    Encoding (the inductive bias): motifs -> R_y, motifs modulate cycle phase
+    R_z(c + alpha*m), spectral -> IsingXX entanglement geometry.
+
+    Trainability redesign (the old Z-only version sat at chance):
+      * data re-uploading -- the chemistry->operator encoding is re-applied EVERY layer,
+        interleaved with a trainable variational block (separate params from the encoding);
+      * richer readout -- measure <X>,<Y>,<Z> per qubit (3*n_qubits features). <X>/<Y>
+        expose the R_z phase information that a Z-only measurement discarded, which had made
+        this level's phase-based bias literally unmeasurable;
+      * learnable per-modality encoding scale + small variational init to escape the
+        near-identity collapse (expval std across molecules was ~0.01).
     """
-    def __init__(self, n_qubits=4, n_layers=2):
+    N_OBS_PER_QUBIT = 3
+
+    def __init__(self, n_qubits=4, n_layers=2, ansatz='strong'):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        self.n_obs = self.N_OBS_PER_QUBIT * n_qubits
+        # 'separable' ablation: drop entanglement (both the spectral-encoded IsingXX and
+        # the trainable entangler), keeping single-qubit ops.
+        entangle = (ansatz != 'separable')
+        # 'scrambled' control: destroy the chemistry->qubit alignment (see _perms).
+        pr_m, pr_c, pm_m, pe_s = _perms(n_qubits, ansatz == 'scrambled', 4)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
-        def circuit(m_inputs, c_inputs, s_inputs, weights, alpha):
-            # weights shape: (n_layers, n_qubits, 2)
+        def circuit(m_inputs, c_inputs, s_inputs, theta, ent, alpha, enc):
+            # Inputs (B, n_qubits) broadcast over the batch. enc: (3,) encoding scales.
             for l in range(n_layers):
+                # --- ENCODING (re-uploaded chemistry->operator geometry) ---
                 for i in range(n_qubits):
-                    # Local Motif processing
-                    qml.RY(m_inputs[i] * weights[l, i, 0], wires=i)
-
-                    # Motif modulates Phase Accumulation of Cycle! (Cross-modality interaction)
-                    # This represents geometric dependency.
-                    phase = (c_inputs[i] * weights[l, i, 1]) + (alpha[i] * m_inputs[i])
+                    qml.RY(enc[0] * m_inputs[:, pr_m[i]], wires=i)
+                    phase = enc[1] * c_inputs[:, pr_c[i]] + alpha[i] * m_inputs[:, pm_m[i]]
                     qml.RZ(phase, wires=i)
+                if entangle:
+                    for i in range(n_qubits - 1):
+                        qml.IsingXX(enc[2] * s_inputs[:, pe_s[i]], wires=[i, i + 1])
+                    qml.IsingXX(enc[2] * s_inputs[:, pe_s[n_qubits - 1]], wires=[n_qubits - 1, 0])
+                # --- VARIATIONAL (trainable) ---
+                for i in range(n_qubits):
+                    qml.RY(theta[l, i, 0], wires=i)
+                    qml.RZ(theta[l, i, 1], wires=i)
+                if entangle:
+                    for i in range(n_qubits):
+                        qml.CRZ(ent[l, i], wires=[i, (i + 1) % n_qubits])
 
-                # Spectral dictates Entanglement Geometry directly!
-                for i in range(n_qubits - 1):
-                    # Here s_inputs directly controls the strength of the XX coupling
-                    # without an independent learned parameter (or with a global one).
-                    # The chemistry (spectral mode) defines the interaction topology.
-                    qml.IsingXX(s_inputs[i], wires=[i, i+1])
-                qml.IsingXX(s_inputs[-1], wires=[n_qubits-1, 0])
-
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+            return ([qml.expval(qml.PauliX(i)) for i in range(n_qubits)] +
+                    [qml.expval(qml.PauliY(i)) for i in range(n_qubits)] +
+                    [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)])
 
         self.qnode = circuit
-        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 2))
-        self.alpha = nn.Parameter(torch.randn(n_qubits)) # Modulation scale
+        self.theta = nn.Parameter(torch.randn(n_layers, n_qubits, 2) * 0.1)
+        self.ent = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.1)
+        self.alpha = nn.Parameter(torch.randn(n_qubits) * 0.1)  # motif->cycle modulation
+        self.enc_scale = nn.Parameter(torch.ones(3))            # per-modality encoding scale
 
     def forward(self, m, c, s):
         m = torch.atan(m)
         c = torch.atan(c)
         s = torch.atan(s)
-
-        # Process batch by batch
-        batch_size = m.shape[0]
-        res = []
-        for b in range(batch_size):
-            out = self.qnode(m[b], c[b], s[b], self.weights, self.alpha)
-            res.append(torch.stack(out))
-        return torch.stack(res, dim=0).float()
+        # Vectorized over the batch via PennyLane broadcasting.
+        out = self.qnode(m, c, s, self.theta, self.ent, self.alpha, self.enc_scale)
+        return torch.stack(out, dim=-1).float()   # (B, 3*n_qubits)
 
 class Level3Quantum(nn.Module):
-    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2, ansatz='strong'):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
 
@@ -352,9 +423,9 @@ class Level3Quantum(nn.Module):
         self.proj_cycle = nn.Linear(hidden_dim, n_qubits)
         self.proj_spectral = nn.Linear(hidden_dim, n_qubits)
 
-        self.q_layer = Level3QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
+        self.q_layer = Level3QuantumLayer(n_qubits=n_qubits, n_layers=q_layers, ansatz=ansatz)
 
-        self.head = nn.Linear(n_qubits, out_dim)
+        self.head = nn.Linear(self.q_layer.n_obs, out_dim)
 
     def forward(self, data):
         m, c, s, _, desc_preds = self.extractor(data)
@@ -416,48 +487,50 @@ class Level4QuantumLayer(nn.Module):
     Utilizes explicitly provided 3D Euclidean distances to modulate entanglement gates (CRZ),
     achieving a natively Quantum Geometric Message Passing layer.
     """
-    def __init__(self, n_qubits=4, n_layers=2):
+    def __init__(self, n_qubits=4, n_layers=2, ansatz='strong'):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        # 'separable' ablation: keep chemical state prep but drop the
+        # distance-modulated spatial entanglement.
+        entangle = (ansatz != 'separable')
+        # 'scrambled' control: the inductive bias is that the distance between a
+        # specific qubit pair modulates *that pair's* coupling. Permuting the chemical
+        # state-prep and the distance->coupling routing (independently) breaks which
+        # distance governs which entangling gate.
+        self.n_obs = N_OBS_PER_QUBIT * n_qubits
+        pr_c, pe_d = _perms(n_qubits, ansatz == 'scrambled', 2)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
-        def circuit(chem_inputs, dist_inputs, weights):
+        def circuit(chem_inputs, dist_inputs, theta, ent, enc):
             for l in range(n_layers):
-                # 1. State Preparation (Chemical features)
+                # --- ENCODING (re-uploaded): chem state-prep + distance-modulated entanglement ---
                 for i in range(n_qubits):
-                    qml.RY(chem_inputs[i] * weights[l, i, 0], wires=i)
-
-                # 2. 3D Spatial Entanglement (Native Quantum Edge Processing)
-                # We map the pooled Euclidean distance directly into the phase of the entangling gate.
-                # In a true sparse QGNN, we'd map specific distances to specific qubit pairs.
-                # Here, we use the graph-level distance representation to scale the ring topology.
-                for i in range(n_qubits - 1):
-                    # Inversely scale entanglement by distance (closer = stronger)
-                    coupling = weights[l, i, 1] / (1.0 + dist_inputs[i])
-                    qml.CRZ(coupling, wires=[i, i+1])
-                qml.CRZ(weights[l, -1, 1] / (1.0 + dist_inputs[-1]), wires=[n_qubits-1, 0])
-
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+                    qml.RY(enc[0] * chem_inputs[:, pr_c[i]], wires=i)
+                if entangle:
+                    # 3D distance inversely scales the coupling (closer atoms -> stronger).
+                    for i in range(n_qubits - 1):
+                        qml.CRZ(enc[1] / (1.0 + dist_inputs[:, pe_d[i]]), wires=[i, i + 1])
+                    qml.CRZ(enc[1] / (1.0 + dist_inputs[:, pe_d[n_qubits - 1]]), wires=[n_qubits - 1, 0])
+                # --- VARIATIONAL (trainable) ---
+                _variational_block(theta[l], ent[l], n_qubits, entangle)
+            return _xyz_measure(n_qubits)
 
         self.qnode = circuit
-        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 2))
+        self.theta = nn.Parameter(torch.randn(n_layers, n_qubits, 2) * 0.1)
+        self.ent = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.1)
+        self.enc_scale = nn.Parameter(torch.ones(2))   # chem, distance
 
     def forward(self, chem, dist):
         chem = torch.atan(chem)
         # Distances are strictly positive, scale using log
         dist = torch.log1p(torch.abs(dist))
-
-        batch_size = chem.shape[0]
-        res = []
-        for b in range(batch_size):
-            out = self.qnode(chem[b], dist[b], self.weights)
-            res.append(torch.stack(out))
-        return torch.stack(res, dim=0).float()
+        out = self.qnode(chem, dist, self.theta, self.ent, self.enc_scale)
+        return torch.stack(out, dim=-1).float()
 
 class Level4Quantum(nn.Module):
-    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2, ansatz='strong'):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
 
@@ -467,8 +540,8 @@ class Level4Quantum(nn.Module):
         self.dist_proj = nn.Linear(1, n_qubits)
         self.spatial_pool = AttentionalAggregation(nn.Sequential(nn.Linear(n_qubits, 1)))
 
-        self.q_layer = Level4QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
-        self.head = nn.Linear(n_qubits, out_dim)
+        self.q_layer = Level4QuantumLayer(n_qubits=n_qubits, n_layers=q_layers, ansatz=ansatz)
+        self.head = nn.Linear(self.q_layer.n_obs, out_dim)
 
     def forward(self, data):
         _, _, _, chem, desc_preds = self.extractor(data)
@@ -514,44 +587,50 @@ class Level5QuantumLayer(nn.Module):
     Z-rotations reflect atomic electronic properties.
     Entanglements reflect chemical bond orders.
     """
-    def __init__(self, n_qubits=4, n_layers=2):
+    def __init__(self, n_qubits=4, n_layers=2, ansatz='strong'):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        self.n_obs = N_OBS_PER_QUBIT * n_qubits
+        # 'separable' ablation: drop the XX/YY bonding entanglement + trainable entangler.
+        entangle = (ansatz != 'separable')
+        # 'scrambled' control: break the coherent "atomic feature i drives qubit i's
+        # rotations AND its bond entanglement" alignment.
+        p_rz, p_ry, p_xx, p_yy = _perms(n_qubits, ansatz == 'scrambled', 4)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
-        def circuit(chem_inputs, weights):
+        def circuit(chem_inputs, theta, ent, enc):
             for l in range(n_layers):
+                # --- ENCODING (re-uploaded): electronic structure + bonding ---
                 for i in range(n_qubits):
-                    # Z-rotations reflect electronegativity / partial charges
-                    qml.RZ(chem_inputs[i] * weights[l, i, 0], wires=i)
-                    qml.RY(chem_inputs[i] * weights[l, i, 1], wires=i)
-                for i in range(n_qubits - 1):
-                    # XX/YY Entanglement reflecting bonding
-                    qml.IsingXX(chem_inputs[i] * weights[l, i, 2], wires=[i, i+1])
-                    qml.IsingYY(chem_inputs[i+1] * weights[l, i, 3], wires=[i, i+1])
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+                    qml.RZ(enc[0] * chem_inputs[:, p_rz[i]], wires=i)  # electronegativity/charge
+                    qml.RY(enc[1] * chem_inputs[:, p_ry[i]], wires=i)
+                if entangle:
+                    for i in range(n_qubits - 1):
+                        qml.IsingXX(enc[2] * chem_inputs[:, p_xx[i]], wires=[i, i + 1])
+                        qml.IsingYY(enc[2] * chem_inputs[:, p_yy[i + 1]], wires=[i, i + 1])
+                # --- VARIATIONAL (trainable) ---
+                _variational_block(theta[l], ent[l], n_qubits, entangle)
+            return _xyz_measure(n_qubits)
 
         self.qnode = circuit
-        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 4))
+        self.theta = nn.Parameter(torch.randn(n_layers, n_qubits, 2) * 0.1)
+        self.ent = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.1)
+        self.enc_scale = nn.Parameter(torch.ones(3))
 
     def forward(self, chem):
         chem = torch.atan(chem)
-        batch_size = chem.shape[0]
-        res = []
-        for b in range(batch_size):
-            out = self.qnode(chem[b], self.weights)
-            res.append(torch.stack(out))
-        return torch.stack(res, dim=0).float()
+        out = self.qnode(chem, self.theta, self.ent, self.enc_scale)
+        return torch.stack(out, dim=-1).float()
 
 class Level5Quantum(nn.Module):
-    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2, ansatz='strong'):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
         self.proj_chem = nn.Linear(hidden_dim, n_qubits)
-        self.q_layer = Level5QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
-        self.head = nn.Linear(n_qubits, out_dim)
+        self.q_layer = Level5QuantumLayer(n_qubits=n_qubits, n_layers=q_layers, ansatz=ansatz)
+        self.head = nn.Linear(self.q_layer.n_obs, out_dim)
 
     def forward(self, data):
         _, _, _, chem, desc_preds = self.extractor(data)
@@ -588,45 +667,51 @@ class Level6QuantumLayer(nn.Module):
     Level 6 Quantum Layer: "3D Spatial / Electrostatic Mapping"
     Interactions mimic spatial folding and physical distances.
     """
-    def __init__(self, n_qubits=4, n_layers=2):
+    def __init__(self, n_qubits=4, n_layers=2, ansatz='strong'):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        self.n_obs = N_OBS_PER_QUBIT * n_qubits
+        # 'separable' ablation: drop the all-to-all electrostatic entanglement + entangler.
+        entangle = (ansatz != 'separable')
+        # 'scrambled' control: break the electrostatic product term chem_i*chem_j and its
+        # coherence with the single-qubit rotations.
+        p_rx, p_ry, p_rz, pc_i, pc_j = _perms(n_qubits, ansatz == 'scrambled', 5)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
-        def circuit(chem_inputs, weights):
+        def circuit(chem_inputs, theta, ent, enc):
             for l in range(n_layers):
+                # --- ENCODING (re-uploaded): full single-qubit rotations + electrostatic coupling ---
                 for i in range(n_qubits):
-                    qml.RX(chem_inputs[i] * weights[l, i, 0], wires=i)
-                    qml.RY(chem_inputs[i] * weights[l, i, 1], wires=i)
-                    qml.RZ(chem_inputs[i] * weights[l, i, 2], wires=i)
-                # All-to-all entanglement weighted by 3D spatial chem feature
-                for i in range(n_qubits):
-                    for j in range(i + 1, n_qubits):
-                        coupling = chem_inputs[i] * chem_inputs[j] * weights[l, i, 3]
-                        qml.CRZ(coupling, wires=[i, j])
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+                    qml.RX(enc[0] * chem_inputs[:, p_rx[i]], wires=i)
+                    qml.RY(enc[0] * chem_inputs[:, p_ry[i]], wires=i)
+                    qml.RZ(enc[0] * chem_inputs[:, p_rz[i]], wires=i)
+                if entangle:
+                    for i in range(n_qubits):
+                        for j in range(i + 1, n_qubits):
+                            qml.CRZ(enc[1] * chem_inputs[:, pc_i[i]] * chem_inputs[:, pc_j[j]], wires=[i, j])
+                # --- VARIATIONAL (trainable) ---
+                _variational_block(theta[l], ent[l], n_qubits, entangle)
+            return _xyz_measure(n_qubits)
 
         self.qnode = circuit
-        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 4))
+        self.theta = nn.Parameter(torch.randn(n_layers, n_qubits, 2) * 0.1)
+        self.ent = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.1)
+        self.enc_scale = nn.Parameter(torch.ones(2))   # rotations, coupling
 
     def forward(self, chem):
         chem = torch.atan(chem)
-        batch_size = chem.shape[0]
-        res = []
-        for b in range(batch_size):
-            out = self.qnode(chem[b], self.weights)
-            res.append(torch.stack(out))
-        return torch.stack(res, dim=0).float()
+        out = self.qnode(chem, self.theta, self.ent, self.enc_scale)
+        return torch.stack(out, dim=-1).float()
 
 class Level6Quantum(nn.Module):
-    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2, ansatz='strong'):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
         self.proj_chem = nn.Linear(hidden_dim, n_qubits)
-        self.q_layer = Level6QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
-        self.head = nn.Linear(n_qubits, out_dim)
+        self.q_layer = Level6QuantumLayer(n_qubits=n_qubits, n_layers=q_layers, ansatz=ansatz)
+        self.head = nn.Linear(self.q_layer.n_obs, out_dim)
 
     def forward(self, data):
         _, _, _, chem, desc_preds = self.extractor(data)
@@ -663,44 +748,50 @@ class Level7QuantumLayer(nn.Module):
     Level 7 Quantum Layer: "Pharmacophore / Reactivity Mapping"
     Quantum states represent specific chemical reactivity sites.
     """
-    def __init__(self, n_qubits=4, n_layers=2):
+    def __init__(self, n_qubits=4, n_layers=2, ansatz='strong'):
         super().__init__()
         self.n_qubits = n_qubits
         self.n_layers = n_layers
+        self.n_obs = N_OBS_PER_QUBIT * n_qubits
+        # 'separable' ablation: drop the controlled pharmacophore dependency + entangler.
+        entangle = (ansatz != 'separable')
+        # 'scrambled' control: break the reactivity-site -> U3/CRX/CRY correspondence.
+        p_u3a, p_u3b, p_u3c, p_crx, p_cry = _perms(n_qubits, ansatz == 'scrambled', 5)
         self.dev = qml.device("default.qubit", wires=n_qubits)
 
         @qml.qnode(self.dev, interface="torch")
-        def circuit(chem_inputs, weights):
+        def circuit(chem_inputs, theta, ent, enc):
             for l in range(n_layers):
+                # --- ENCODING (re-uploaded): pharmacophore U3 + controlled dependencies ---
                 for i in range(n_qubits):
-                    qml.U3(chem_inputs[i] * weights[l, i, 0],
-                           chem_inputs[i] * weights[l, i, 1],
-                           chem_inputs[i] * weights[l, i, 2], wires=i)
-                for i in range(n_qubits - 1):
-                    # Multi-controlled interactions representing complex pharmacophore dependencies
-                    qml.CRX(chem_inputs[i] * weights[l, i, 3], wires=[i, i+1])
-                    qml.CRY(chem_inputs[i+1] * weights[l, i, 4], wires=[i, i+1])
-            return [qml.expval(qml.PauliZ(i)) for i in range(n_qubits)]
+                    qml.U3(enc[0] * chem_inputs[:, p_u3a[i]],
+                           enc[0] * chem_inputs[:, p_u3b[i]],
+                           enc[0] * chem_inputs[:, p_u3c[i]], wires=i)
+                if entangle:
+                    for i in range(n_qubits - 1):
+                        qml.CRX(enc[1] * chem_inputs[:, p_crx[i]], wires=[i, i + 1])
+                        qml.CRY(enc[1] * chem_inputs[:, p_cry[i + 1]], wires=[i, i + 1])
+                # --- VARIATIONAL (trainable) ---
+                _variational_block(theta[l], ent[l], n_qubits, entangle)
+            return _xyz_measure(n_qubits)
 
         self.qnode = circuit
-        self.weights = nn.Parameter(torch.randn(n_layers, n_qubits, 5))
+        self.theta = nn.Parameter(torch.randn(n_layers, n_qubits, 2) * 0.1)
+        self.ent = nn.Parameter(torch.randn(n_layers, n_qubits) * 0.1)
+        self.enc_scale = nn.Parameter(torch.ones(2))   # U3, controlled deps
 
     def forward(self, chem):
         chem = torch.atan(chem)
-        batch_size = chem.shape[0]
-        res = []
-        for b in range(batch_size):
-            out = self.qnode(chem[b], self.weights)
-            res.append(torch.stack(out))
-        return torch.stack(res, dim=0).float()
+        out = self.qnode(chem, self.theta, self.ent, self.enc_scale)
+        return torch.stack(out, dim=-1).float()
 
 class Level7Quantum(nn.Module):
-    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2):
+    def __init__(self, hidden_dim=64, n_qubits=4, q_layers=2, out_dim=12, dropout=0.2, ansatz='strong'):
         super().__init__()
         self.extractor = SemanticFeatureExtractor(hidden_dim=hidden_dim, dropout=dropout)
         self.proj_chem = nn.Linear(hidden_dim, n_qubits)
-        self.q_layer = Level7QuantumLayer(n_qubits=n_qubits, n_layers=q_layers)
-        self.head = nn.Linear(n_qubits, out_dim)
+        self.q_layer = Level7QuantumLayer(n_qubits=n_qubits, n_layers=q_layers, ansatz=ansatz)
+        self.head = nn.Linear(self.q_layer.n_obs, out_dim)
 
     def forward(self, data):
         _, _, _, chem, desc_preds = self.extractor(data)

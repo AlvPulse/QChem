@@ -4,7 +4,7 @@ import numpy as np
 import random
 import os
 
-from src.data_loader import get_dataloaders, get_toxcast_dataloaders
+from src.data_loader import get_dataloaders, get_toxcast_dataloaders, get_merged_dataloaders
 from src.train import Trainer
 from src.hybrid_model import HybridEnsembleVQC
 from src.baselines import HybridClassicalEnsemble, run_rf_baseline
@@ -55,7 +55,7 @@ def main():
     parser.add_argument('--gnn', type=str, default='gine', choices=['gine', 'gat'])
     parser.add_argument('--dropout', type=float, default=0.2)
     parser.add_argument('--diagnose', action='store_true', help='Run kernel diagnostics before training')
-    parser.add_argument('--dataset', type=str, default='tox21', choices=['tox21', 'toxcast'], help='Dataset to use')
+    parser.add_argument('--dataset', type=str, default='tox21', choices=['tox21', 'toxcast', 'merged'], help='Dataset to use (merged = Tox21 + ToxCast, 629 tasks)')
 
     args = parser.parse_args()
 
@@ -72,6 +72,8 @@ def main():
     print(f"Loading {args.dataset.capitalize()} Data...")
     if args.dataset == 'toxcast':
         train_loader, val_loader, test_loader, pos_weight, num_tasks = get_toxcast_dataloaders(batch_size=args.batch_size)
+    elif args.dataset == 'merged':
+        train_loader, val_loader, test_loader, pos_weight, num_tasks = get_merged_dataloaders(batch_size=args.batch_size)
     else:
         train_loader, val_loader, test_loader, pos_weight, num_tasks = get_dataloaders(batch_size=args.batch_size)
 

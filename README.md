@@ -32,12 +32,24 @@ The project is structured to demonstrate an incremental buildup:
 *   **Files:** `src/loss.py`
 *   **Description:** Custom `MaskedBCEWithLogitsLoss` to seamlessly handle the missing labels in Tox21 across all models.
 
-### Step 7: Deep Quantum Inductive Bias (The 3 Levels of Novelty)
-*   **Files:** `src/quantum_levels.py`, `run_experiment.py` (New implementations)
-*   **Description:** To truly demonstrate quantum advantage over classical networks of the same parameter count, we introduce three structural levels comparing Classical MLPs against Quantum Circuits:
-    *   **Level 1 (Features -> Models):** "Three Circuits + Attention". Motif, Cycle, and Spectral features are routed to independent models and aggregated. (Weak novelty).
-    *   **Level 2 (Features -> Operator Families):** "Chemical-to-Operator Correspondence". Motifs map to local $R_y$ observables; Cycles to $R_z$ phase operators; Spectral to $XY$ Hamiltonians. (Stronger novelty).
-    *   **Level 3 (Features -> Operator Geometry):** "Chemical Operator Geometry". Deep cross-modulation where, for example, motif features dynamically modulate the phase accumulation of cycle features ($R_z(c + \alpha m)$), and spectral features dictate entanglement strength ($e^{-i \theta(s) Z_i Z_j}$). (Highest novelty).
+### Step 7: Deep Quantum Inductive Bias (7 Levels of Novelty)
+*   **Files:** `src/quantum_levels.py`, `run_experiment.py`
+*   **Description:** The goal is **not** "quantum beats classical" but to isolate the value of the *quantum inductive bias* — the deliberate mapping of chemical features onto specific operator geometry. We define seven structural levels. Each level's quantum head can be instantiated in three circuit variants that share the same gate set, parameter count and depth, plus a parameter-matched classical baseline. All share the classical `SemanticFeatureExtractor` encoder:
+    *   `*_quantum` (**structured**) — the proposed circuit: chemistry drives specific operator families/geometry, with entanglement.
+    *   **scrambled** (control, headline comparison) — the *same* circuit, gates, parameters, depth and entanglement, but the chemistry→operator correspondence is destroyed (each operator reads its input feature through a different fixed random permutation). A gain of *structured over scrambled* is attributable to the **inductive bias itself**, not to model capacity. Selected with `ansatz='scrambled'` (used by `run_benchmark.py`).
+    *   `*_separable` (control) — identical circuit with **all entangling gates removed**, isolating whether *entanglement* (not just added parameters) drives any gain.
+    *   `*_classical` — a parameter-matched classical MLP (inner width auto-tuned in `run_benchmark.py` to match the quantum parameter count); a **context baseline**, not the headline.
+
+    *(Note: Level 1 has no chemistry→operator-geometry mapping — it is a generic embedding + entangler — so its `scrambled` variant is structurally identical to `structured`; the control only has a lever from Level 2 onward.)*
+
+    The levels:
+    *   **Level 1 (Features -> Models):** "Three Circuits + Attention". Motif, Cycle, and Spectral features routed to independent circuits and aggregated by attention.
+    *   **Level 2 (Features -> Operator Families):** "Chemical-to-Operator Correspondence". Motifs -> local $R_y$; Cycles -> $R_z$ phase; Spectral -> Ising $XX$ Hamiltonians.
+    *   **Level 3 (Features -> Operator Geometry):** "Chemical Operator Geometry". Motif features modulate cycle phase accumulation ($R_z(c + \alpha m)$); spectral features directly dictate entanglement strength.
+    *   **Level 4 (3D Spatial Entanglement):** Euclidean distances modulate $CRZ$ entanglement (closer atoms -> stronger coupling).
+    *   **Level 5 (Electronic Structure / Hückel):** $R_z/R_y$ reflect electronegativity/partial charges; $XX/YY$ entanglement reflects bonding.
+    *   **Level 6 (3D Electrostatic Mapping):** full single-qubit rotations + all-to-all $CRZ$ coupling weighted by spatial features.
+    *   **Level 7 (Pharmacophore / Reactivity):** $U3$ rotations per reactivity site + controlled $CRX/CRY$ pharmacophore dependencies.
 
 ---
 
@@ -46,41 +58,84 @@ The project is structured to demonstrate an incremental buildup:
 Ensure you have Python 3.8+ installed.
 
 ```bash
-pip install torch torch-geometric pennylane rdkit scikit-learn pandas numpy tqdm
+pip install torch torch-geometric pennylane rdkit scikit-learn pandas numpy tqdm matplotlib seaborn scipy
 ```
+
+## Datasets
+
+Three options, selected with `--dataset`:
+
+*   `tox21`   — Tox21, 12 tasks (parsed from `EDA_dataset.csv`).
+*   `toxcast` — ToxCast, 617 tasks (auto-downloaded via PyG `MoleculeNet`).
+*   `merged`  — **Tox21 + ToxCast combined into a single 629-task problem.** Molecules are keyed by canonical SMILES; a molecule absent from one dataset gets `NaN` labels for that block, which the masked BCE / contrastive losses ignore. Built by `build_merged_dataframe` in `src/data_loader.py`.
+
+All datasets share the same featurization (`mol_to_pyg`): 5 categorical atom features, 8 continuous chemical features (`x_cont`: partial charge, electronegativity, 3D coords, pharmacophore tags), 3D conformers, and 6 auxiliary molecular descriptors. **Note:** 3D conformer embedding makes featurization of the merged set slow on first run.
 
 ## Running Experiments
 
-Use the `run_experiment.py` script to train models and evaluate performance across the evolutionary levels.
+Use `run_experiment.py` to train a single model. Add `--dataset merged` (or `tox21` / `toxcast`).
 
-### Running the New Levels (Levels 1-3)
-
-**Level 1:**
 ```bash
-python run_experiment.py --model level1_quantum
-python run_experiment.py --model level1_classical
-```
+# Levels 1-7, quantum vs parameter-matched classical, on the merged dataset
+python run_experiment.py --model level3_quantum   --dataset merged --qubits 4 --layers 2
+python run_experiment.py --model level3_classical --dataset merged
 
-**Level 2:**
-```bash
-python run_experiment.py --model level2_quantum
-python run_experiment.py --model level2_classical
-```
-
-**Level 3:**
-```bash
-python run_experiment.py --model level3_quantum
-python run_experiment.py --model level3_classical
-```
-
-### Running Older Baselines
-```bash
-# Standard Classical GNN
-python run_experiment.py --model classical_gnn --gnn gine
-
-# Hybrid Ensemble (Step 4)
+# Older baselines
+python run_experiment.py --model classical_gnn --gnn gine --dataset tox21
 python run_experiment.py --model hybrid_ensemble --estimators 4 --qubits 4 --layers 2
-
-# Random Forest
 python run_experiment.py --model rf
 ```
+
+## Results & Benchmarking Chapter
+
+The dissertation-style **Results and Benchmarking** write-up is
+[`docs/06_results_benchmarking.md`](docs/06_results_benchmarking.md): a per-model + cross-model
+report anchored on the statistically valid Level-8/probe family (the absorbability proof shows the
+seven abstract levels' `structured − scrambled` is vacuous at L1/2/4). Numbers come from a single
+sourced module (`report_data.py`); figures from `make_figures.py` → `docs/figures/`; an optional
+reduced-fidelity corroboration harness is `make_figdata.py`. Implementation/methods (data
+re-uploading, graph-gated entangler, bond-correlator readout, control definitions, training regime)
+are in [`docs/07_technical_implementation.md`](docs/07_technical_implementation.md). The
+publication-readiness gap audit is [`docs/08_publication_readiness.md`](docs/08_publication_readiness.md),
+and the robustness/mechanism/theory **extension results** (K=8, finite-shot, device-noise, mechanism,
+representation probing, scaling lemma, power) are consolidated in
+[`docs/09_extension_results.md`](docs/09_extension_results.md).
+
+## Full Benchmark Suite
+
+`run_benchmark.py` runs the rigorous comparison: **scaffold-grouped** K-fold CV over the
+selected levels × {structured (quantum), scrambled, separable, classical} × qubit scales
+on the **merged Tox21 + ToxCast** dataset, with significance tests and bootstrap 95% CIs.
+Results are written incrementally to `results/benchmark_cv_results.csv`.
+
+**Why scaffold CV?** Each Bemis–Murcko scaffold lands entirely in one fold (via
+`GroupKFold`), so the held-out fold is structurally novel — a deployment-relevant
+out-of-distribution split rather than the over-optimistic random split. Validation is
+carved off the *training* scaffolds so early stopping isn't tuned on leaked structures.
+
+```bash
+python run_benchmark.py                 # full run (levels 1-7, qubits {4,6}, 5 folds)
+python run_benchmark.py --quick         # fast smoke run (levels 1-3, 4 qubits, 3 folds, 20 epochs)
+python run_benchmark.py --levels 3 5 --qubits 4 --folds 5 --epochs 100
+```
+
+Useful flags: `--levels`, `--qubits`, `--folds`, `--epochs`, `--patience`,
+`--batch_size`, `--bootstrap`, `--datasets`, `--no_cache`, `--out`.
+
+**Headline comparison.** The primary result is **structured vs scrambled** — same gates,
+parameters, depth and entanglement, differing *only* in the chemistry→operator mapping.
+A gain there isolates the inductive bias. `separable` isolates entanglement; `classical`
+is context.
+
+**Significance reporting.** Two tests are reported per comparison:
+*   **Per-task paired Wilcoxon** (primary): pairs structured vs {scrambled, separable, classical} ROC-AUC across the hundreds of tasks (computed on identical pooled CV predictions). This is well powered.
+*   **Fold-level Wilcoxon** (reference only): with 5 folds the smallest achievable two-sided p-value is 0.0625, so it can essentially *never* reach 0.05 — don't read significance into it.
+
+Both are Bonferroni-corrected (×3) for the three comparisons. Per configuration the CSV
+reports CV mean/std for **ROC-AUC, AUPRC and Brier**, bootstrap 95% CIs, and per comparison
+`p_task_vs_{scrambled,separable,classical}`, `median_dAUC_vs_*`, and `p_fold_vs_*`.
+
+### Performance notes
+The earlier version was dominated by two costs, both fixed:
+*   **Featurization** (3D conformer embedding of ~10k molecules) now runs once and is cached to `data/featurized_<datasets>.pt` (delete it or pass `--no_cache` to rebuild).
+*   **Quantum circuits** previously ran one molecule at a time through PennyLane; they are now **batched via parameter broadcasting** (~50× faster per forward), plus parameter-matching is memoized across folds.
