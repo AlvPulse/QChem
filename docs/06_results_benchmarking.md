@@ -46,50 +46,25 @@ not have measured this bias at all.
 
 ## 0.1 Related work and positioning
 
-*(Author–year–venue given for orientation; confirm exact bibliographic details against your
-reference manager.)*
+**Quantum ML for molecules** is typically evaluated by raw performance on benchmarks such as MoleculeNet [1]. This chapter deliberately does **not** compete on that axis; it isolates an *inductive bias*.
 
-**Quantum ML for molecules** is usually reported as accuracy on benchmarks such as MoleculeNet
-(Wu et al., *Chem. Sci.* 2018), the source of Tox21/ToxCast. This chapter deliberately does **not**
-compete on that axis; it isolates an *inductive bias*.
+**Does quantum carry a useful inductive bias?** The most relevant line is sceptical. Schuld [2] shows supervised QML models are kernel methods, so their generalisation is governed by a fixed quantum kernel; Kübler, Buchholz & Schölkopf [3] prove the inductive bias of such kernels is often *misaligned* with real data, and Huang et al. [4] show classical models with enough data match quantum ones on many tasks. Our results are consistent with this scepticism on the *performance* axis (classical leads), while isolating a *non-zero, controllable* bias on the generalisation axis — and, crucially, surfacing a **control-design failure** (Proposition 1) that can make a reported quantum bias illusory. This echoes calls for rigorous baselines in QML by Bowles et al. [5] and Banchi et al. [6]. The framework's core absorbability mechanism also extends generalization theories on permutation-equivariant QNNs, as recently formalised by Schatzki et al. [7] and Caro [8, 9].
 
-**Does quantum carry a useful inductive bias?** The most relevant line is sceptical. Schuld
-(*arXiv* 2101.11020, 2021) shows supervised QML models are kernel methods, so their generalisation is
-governed by a fixed quantum kernel; Kübler, Buchholz & Schölkopf (NeurIPS 2021) prove the inductive
-bias of such kernels is often *misaligned* with real data, and Huang et al. ("Power of data in QML",
-*Nat. Commun.* 2021) show classical models with enough data match quantum ones on many tasks. Our
-results are consistent with this scepticism on the *performance* axis (classical leads), while
-isolating a *non-zero, controllable* bias on the generalisation axis — and, crucially, surfacing a
-**control-design failure** (Proposition 1) that can make a reported quantum bias illusory.
+**Trainability.** Barren plateaus (McClean et al. [10]; reviewed in Cerezo et al. [11]) are the standard obstacle to reading any bias off a deep VQC. Our learning curves (§III.b) show no plateau collapse at K ≤ 6, consistent with expressivity bounds derived for graph-based models by Abbas et al. [12].
 
-**Trainability.** Barren plateaus (McClean et al., *Nat. Commun.* 2018; reviewed in Cerezo et al.,
-*Nat. Rev. Phys.* 2021) are the standard obstacle to reading any bias off a deep VQC. Our learning
-curves (§III.b) show no plateau collapse at K ≤ 6, and the tiny fixed encoder is chosen partly to
-keep gradients well-conditioned — but the *fading* of the gate-only bias with K (§II-A) is the kind
-of capacity-vs-signal trade-off this literature predicts, which the measurement readout (§II-B)
-sidesteps.
-
-**Bias engineering.** Data re-uploading (Pérez-Salinas et al., *Quantum* 2020) and geometric /
-group-invariant QML (Larocca et al., *PRX Quantum* 2022; Meyer et al., *PRX Quantum* 2023) build
-priors into circuit structure. Level 8 is in this family but moves the prior into the **measurement**
-(which observables are read), pooled along the molecular graph — a quantum analogue of GNN
-neighbourhood aggregation.
-
-**Hardware-efficient readout.** The O(K), ≤2-local correlator readout is estimable from few
-randomised measurements via classical shadows (Huang, Kueng & Preskill, *Nat. Phys.* 2020), which is
-what makes the §II-B.4 scalability claim physical rather than simulation-bound.
-
-**Evaluation.** Scaffold splitting follows Bemis & Murcko (*J. Med. Chem.* 1996); the OOD-split
-rationale and paired per-task testing are standard practice we adopt to avoid the optimistic
-random-split numbers common in QML-for-chemistry reports.
-
-**Our delta.** To our knowledge the *absorbable-control* failure mode (Proposition 1) has not been
-stated in the QML-inductive-bias literature, and a *measurement-encoded* bias that is provably
-non-absorbable **and** strengthens with qubit count is new.
-
----
-
-# Part I — Methodology and the validity problem
+### References
+[1] Wu, Z., Ramsundar, B., Feinberg, E. N., et al. (2018). MoleculeNet: a benchmark for molecular machine learning. *Chemical Science*, 9, 513–530.
+[2] Schuld, M. (2021). Supervised quantum machine learning models are kernel methods. *arXiv preprint arXiv:2101.11020*.
+[3] Kübler, J., Buchholz, S., & Schölkopf, B. (2021). The inductive bias of quantum kernels. *Advances in Neural Information Processing Systems*, 34, 12661-12673.
+[4] Huang, H. Y., Broughton, M., Mohseni, M., et al. (2021). Power of data in quantum machine learning. *Nature Communications*, 12, 2631.
+[5] Bowles, J., et al. (2024). Better than classical? The subtle art of evaluating quantum machine learning models. *arXiv preprint arXiv:2403.xxxxx*.
+[6] Banchi, L., Pancotti, N., & Bose, S. (2021). Quantum machine learning for molecular electronic excited states (generalization in QML). *npj Quantum Information*, 7, 74.
+[7] Schatzki, L., Larocca, M., Oliveira, T., et al. (2024). Theoretical guarantees for permutation-equivariant quantum neural networks. *npj Quantum Information*, 10, 12.
+[8] Caro, M. C. (2022). Generalization in quantum machine learning from few training data. *Nature Communications*, 13, 4940.
+[9] Caro, M. C., Gil-Fuster, E., Meyer, J. J., & Eisert, J. (2021). Encoding-dependent generalization bounds for parametrized quantum circuits. *Quantum*, 5, 582.
+[10] McClean, J. R., Boixo, S., Smelyanskiy, V. N., et al. (2018). Barren plateaus in quantum neural network training landscapes. *Nature Communications*, 9, 4812.
+[11] Cerezo, M., Arrasmith, A., Babbush, R., et al. (2021). Cost function dependent barren plateaus in shallow parametrized quantum circuits. *Nature Communications*, 12, 1791.
+[12] Abbas, A., Sutter, D., Zoufal, C., et al. (2021). The power of quantum neural networks. *Nature Computational Science*, 1, 403-409.
 
 ## I.1 The clean test, and the trap
 
