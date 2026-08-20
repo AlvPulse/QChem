@@ -139,3 +139,11 @@ reports CV mean/std for **ROC-AUC, AUPRC and Brier**, bootstrap 95% CIs, and per
 The earlier version was dominated by two costs, both fixed:
 *   **Featurization** (3D conformer embedding of ~10k molecules) now runs once and is cached to `data/featurized_<datasets>.pt` (delete it or pass `--no_cache` to rebuild).
 *   **Quantum circuits** previously ran one molecule at a time through PennyLane; they are now **batched via parameter broadcasting** (~50× faster per forward), plus parameter-matching is memoized across folds.
+
+## Publication Readiness & Project Synthesis
+This repository contains the complete empirical and theoretical pipeline for the **Quantum-Topological Information Bottleneck (Q-TIB)** and the **Level-8 Architecture**.
+
+For a comprehensive synthesis of the results intended for manuscript generation, please consult:
+1. `docs/Final_Paper_Synthesis_for_Writer.md` - The master document detailing all Phase A-L results, including multi-seed scaling, external validity on BBBP, absolute SOTA baselines, Phase K architecture evolutions (Multi-hop, Aromatic-gate conditions), and Phase L NISQ hardware resilience.
+2. `docs/phase_k_analysis.md` - Detailed breakdowns of the Phase K architecture updates.
+3. `docs/phase_L_hardware_noise.md` - Detailed breakdowns of the Open Quantum System (OQS) simulations.
