@@ -11,11 +11,11 @@ def main():
         sys.exit(1)
 
     # 2. Check if main scripts exist
-    if not os.path.exists("run_classical.py"):
+    if not os.path.exists("experiments/run_classical.py"):
         print("Error: run_classical.py missing")
         sys.exit(1)
 
-    if not os.path.exists("run_quantum.py"):
+    if not os.path.exists("experiments/run_quantum.py"):
         print("Error: run_quantum.py missing")
         sys.exit(1)
 
