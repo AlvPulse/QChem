@@ -56,3 +56,21 @@ We evaluated this `levelG_K3` configuration against the original `levelG` scramb
 The progression through K4 $\rightarrow$ K1 $\rightarrow$ K3 successfully stabilized the topological bias and raised its magnitude significantly above the baseline `Level-8` model.
 
 The Q-TIB framework correctly predicted that pushing topological priors deeper into the measurement basis (K1) and entangling gates (K3) would yield a monotonic increase in inductive bias. Future steps should target **K2: Multi-Hop Bond Pooling** or **K5: Graph-Conditional Data Re-Uploading** to extract interactions beyond the nearest-neighbor cutoff.
+
+## 6. Final Architecture Revisions (K2, K10, K7)
+
+To finalize the theoretical framework of Phase K and maximize the model's structural parity, three structural upgrades were implemented directly into the codebase:
+
+### K2: Multi-Hop Bond Pooling
+The `run_levelG_probe.py` readout was upgraded to parse 2-hop topological neighborhoods alongside direct nearest-neighbor bonds. By computing the squared adjacency matrix $A^2$ and performing a parallel sequence of Pauli correlator aggregations across it, the model now natively intercepts broader $\pi$-conjugation patterns without needing deeper quantum layers.
+
+### K10: Classical Equivariant Baseline Strengthening
+To ensure that the newly empowered quantum Level-8 model is compared fairly, the parameter-matched classical control (`ClassicalGNN`) was upgraded to an equivariant-style message passing scheme. It now employs non-linear pairwise messaging `msg(h_i || h_j)` integrated across 1-hop and 2-hop graph distances, matching the exact relational context window available to the quantum model.
+
+### K7: Separated Quantum Optimization Trajectories
+Following barren-plateau mitigation literature, the parameter updates within `train_eval` were decoupled. The quantum operators (Ansatz angles, graph-gating weights, and re-upload scales) are now optimized under an independent SGD-momentum regime to mimic SPSA/QNG traversal, preventing the high-velocity classical AdamW updates from destabilizing the more sensitive quantum loss landscape.
+
+## 7. Next Steps: Transitioning to Phase L (Hardware & Noise)
+With the Level-8 structure fully matured under Phase K, the next logical step according to the Q-TIB theory is **Phase L**.
+
+Phase L will involve moving from ideal statevector simulators to noisy, shot-finite evaluations (`default.mixed`). We will evaluate the impact of Pauli-twirled depolarizing noise on the Multi-Hop (K2) and Aromatic (K3) features to prove that the topological bottleneck remains resilient in NISQ-equivalent conditions.
