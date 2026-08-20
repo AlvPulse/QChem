@@ -35,7 +35,7 @@ from run_bias_probe import (
 
 
 class GraphG(nn.Module):
-    def __init__(self, k, entangler='graph', readout='graph', n_layers=2, out_dim=N_TASKS, normalize_readout=False, device=None):
+    def __init__(self, k, entangler='graph', readout='graph', n_layers=2, out_dim=N_TASKS, normalize_readout=True, device=None):
         super().__init__()
         self.k = k; self.readout = readout; self.entangler = entangler; self.normalize_readout = normalize_readout
         PAIRS = pairs_of(k); P = len(PAIRS)
@@ -63,6 +63,9 @@ class GraphG(nn.Module):
             if readout == 'graph':
                 obs += [qml.expval(qml.PauliZ(i) @ qml.PauliZ(j)) for i, j in PAIRS]
                 obs += [qml.expval(qml.PauliX(i) @ qml.PauliX(j)) for i, j in PAIRS]
+                obs += [qml.expval(qml.PauliY(i) @ qml.PauliY(j)) for i, j in PAIRS]
+                obs += [qml.expval(qml.PauliX(i) @ qml.PauliZ(j)) for i, j in PAIRS]
+                obs += [qml.expval(qml.PauliY(i) @ qml.PauliZ(j)) for i, j in PAIRS]
             return obs
         self.circ = circ; self.P = P
         self.feat = nn.Linear(FDIM, 2)
@@ -70,7 +73,7 @@ class GraphG(nn.Module):
         self.ringp = nn.Parameter(torch.randn(n_layers, k) * 0.1)
         self.pairp = nn.Parameter(torch.randn(n_layers, P) * 0.1)
         self.enc = nn.Parameter(torch.ones(2))
-        head_in = 3 * k + (2 * k if readout == 'graph' else 0)
+        head_in = 3 * k + (5 * k if readout == 'graph' else 0)
         self.head = nn.Linear(head_in, out_dim)
 
     def _bond_pool(self, corr, adj):
@@ -94,7 +97,16 @@ class GraphG(nn.Module):
         if self.readout == 'graph':
             zz = torch.stack(out[3 * k:3 * k + P], -1)        # (B,P)
             xx = torch.stack(out[3 * k + P:3 * k + 2 * P], -1)
-            feats += [self._bond_pool(zz, adj), self._bond_pool(xx, adj)]  # (B,k) each
+            yy = torch.stack(out[3 * k + 2 * P:3 * k + 3 * P], -1)
+            xz = torch.stack(out[3 * k + 3 * P:3 * k + 4 * P], -1)
+            yz = torch.stack(out[3 * k + 4 * P:3 * k + 5 * P], -1)
+            feats += [
+                self._bond_pool(zz, adj),
+                self._bond_pool(xx, adj),
+                self._bond_pool(yy, adj),
+                self._bond_pool(xz, adj),
+                self._bond_pool(yz, adj)
+            ]  # (B,k) each
         return self.head(torch.cat(feats, -1))
 
 
