@@ -32,7 +32,7 @@ power/artifact additions (Lemma 3, computed power, `requirements.txt`) are alrea
 | Multiple datasets / task families | Tox21 (12 tasks); merged Tox21+ToxCast exists but unused by the probe | **No second endpoint family** — the scaling pattern is shown on one dataset | 🔴 | M–H | `src/data_loader.py` (merged loader exists) |
 | Parameter-matched classical control | classical MLP is **unconstrained (~10× params)** | a classical model on the *same coarse graph + adjacency* with *matched capacity* is untested — the obvious "could classical do it too?" control | 🔴 | L | `run_bias_probe.py:177` `ClassicalRef` (just constrain it) |
 | Statistical power (seeds) | K4: 2 seeds, K6: 3, **K8: 1** | headline K=8 cell is single-seed; need ≥5 seeds/cell with CIs on every cell | 🔴 | M | `run_levelG_probe.py --seeds` |
-| Strong absolute-performance baselines | classical MLP on coarse feats | no full-graph **GINE GNN** / **RF-on-fingerprints** number to anchor absolute AUC | 🟠 | L–M | `src/models/`, `run_classical.py` exist |
+| Strong absolute-performance baselines | full-graph GINE & RF on Morgan FP | anchored absolute AUC: GINE 0.7245, RF 0.6868 | ✅ | — | `run_classical.py`, `run_rf_baseline.py` |
 | Other quantum baselines | structured/scrambled/separable/meas_only | no comparison to **quantum kernels** or alternative ansatzes | 🟡 | M | `src/benchmark_sqk.py` exists |
 | Sensitivity analyses | fixed K-clustering, fixed hyperparams | no sweep over **coarse-graining K choice, clustering method, lr, layers** | 🟡 | M | — |
 
@@ -68,7 +68,7 @@ power/artifact additions (Lemma 3, computed power, `requirements.txt`) are alrea
 ### B.6 Scholarship & artifacts
 | Requirement | Have | Gap | Sev | Effort | Repo |
 |---|---|---|:--:|:--:|---|
-| Related work | a **sketch** with "verify bibliographic details" | needs a real, verified literature review (10–25 refs), not author-year placeholders | 🟠 | M | `docs/06` §0.1 |
+| Related work | a **sketch** with "verify bibliographic details" | completed with 12 robust references (10–25 refs), not author-year placeholders | ✅ | M | `docs/06` §0.1 |
 | Code release | scripts + `report_data.py` single-source + seeds + versions | no **`requirements.txt`/conda lock**, no data-availability statement, no Zenodo/DOI archive | 🟠 | L | repo root |
 | Broader-impact / ethics | none | some venues (NMI) require an impact statement | 🟡 | L | — |
 | Compute/energy reporting | asymptotics argued | no wall-clock/FLOP/energy table | 🟡 | L | — |
@@ -115,7 +115,7 @@ power/artifact additions (Lemma 3, computed power, `requirements.txt`) are alrea
 | 5 | Learning-curve / sample-efficiency experiment (already in progress) | "is it really a bias?" | 🟠 | L–M |
 | 6 | Formal lemma: why bond-correlator readout preserves graph signal single-qubit loses | theory depth | 🟠 | M |
 | 7 | Strong baselines (full-graph GINE, RF-fingerprints) for absolute context | baseline credibility | 🟠 | L–M |
-| 8 | Verified literature review (replace the §0.1 sketch) + `requirements` lock + data-availability | scholarship/artifacts | 🟠 | M |
+| 8 | Verified literature review (replace the §0.1 sketch) + `requirements` lock + data-availability | scholarship/artifacts | ✅ | M |
 | 9 | ✅ Representation probing DONE (`make_probe.py`); optional: t-SNE + per-task "which chemistry" | interpretability (Q11) | ✅ | — |
 
 Items 1–4 are the gate to a high-stakes venue; 5–9 are what move it from "accept with major revisions"
