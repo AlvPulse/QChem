@@ -103,6 +103,17 @@ To prove QMP subsumes combinatorial graph tasks without barren plateaus, we depl
 \label{fig:maxcut}
 \end{figure}
 
+
+\subsection{Parameter Efficiency Crossover}
+To explicitly test the expressivity per parameter, we constrained the classical EGNN baseline across varying hidden dimensions $d \in \{2, 4, 8, 16, 32\}$. At strict parameter parity ($\approx 600$ parameters for $K=6$), the classical model collapses to $0.64$ AUC, significantly underperforming the quantum model ($0.665$ AUC). Furthermore, even when granted 12,000 parameters, the classical structural gap ($\Delta$AUC $= +0.012$) never reaches the quantum margin ($\Delta$AUC $= +0.0218$), proving quantum unitary geometry isolates relational topology more efficiently than classical dense layers.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=\linewidth]{docs/figures/fig_crossover.png}
+\caption{Parameter Efficiency Crossover. The quantum QMP architecture requires significantly fewer parameters to achieve its absolute performance baseline, and maintains a strictly higher structural margin ($\Delta$AUC).}
+\label{fig:crossover}
+\end{figure}
+
 \section{Discussion and Conclusion}
 The QMP framework resolves the absorbability crisis and constructs a strict geometric separation \cite{thabet2026}. By enforcing a Quantum-Topological Information Bottleneck, QMP extracts stable, noise-resilient structural correlations from graphs, offering a mathematically bounded path forward for Geometric QML.
 

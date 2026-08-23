@@ -76,3 +76,31 @@ plt.savefig('docs/figures/fig_maxcut_traj.png', dpi=300)
 plt.close()
 
 print("Figures successfully generated in docs/figures/")
+
+# 5. Classical vs Quantum Crossover Plot
+# Data from run_classical_crossover.py
+classical_params = [150, 450, 1200, 3600, 12000]
+classical_aucs = [0.580, 0.635, 0.672, 0.702, 0.725]
+
+quantum_params = 600
+quantum_auc = 0.665
+
+plt.figure(figsize=(7, 4))
+plt.plot(classical_params, classical_aucs, marker='o', linestyle='-', color='teal', label='Classical EGNN Baseline')
+plt.axhline(y=quantum_auc, color='darkorange', linestyle='--', label='QMP Level-8 (K=6)')
+plt.axvline(x=quantum_params, color='darkorange', linestyle=':')
+
+# Annotate crossover
+plt.scatter([quantum_params], [quantum_auc], color='darkorange', s=100, zorder=5)
+plt.text(quantum_params + 500, quantum_auc - 0.01, "Quantum Efficiency\nCrossover Point", color='darkorange')
+
+plt.xscale('log')
+plt.xlabel("Trainable Parameters (Log Scale)")
+plt.ylabel("Absolute AUC (Tox21)")
+plt.title("Parameter Efficiency Crossover: Quantum vs Classical Expressivity")
+plt.legend()
+plt.tight_layout()
+plt.savefig('docs/figures/fig_crossover.png', dpi=300)
+plt.close()
+
+print("Crossover figure generated.")
